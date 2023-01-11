@@ -33,17 +33,19 @@ jobs:
           author_email: mail@example.com
           message: 'Your commit message'
           add: '*.c'
-      - name: Issues    
-        run: |
-          curl --request POST \
-          --url https://api.github.com/repos/${{ github.repository }}/issues \
-          --header 'authorization: Bearer ${{ secrets.GITHUB_TOKEN }}' \
-          --header 'content-type: application/json' \
-          --data '{
-            "title": "Automated issue for commit: ${{ github.sha }}",
-            "body": "This issue was automatically created by the GitHub Action workflow **${{ github.workflow }}**. \n\n The commit hash was: _${{ github.sha }}_."
-            }' \
-          --fail
+      #Issues
+      #- name: Issues    
+      #  run: |
+      #    curl --request POST \
+      #    --url https://api.github.com/repos/${{ github.repository }}/issues \
+      #    --header 'authorization: Bearer ${{ secrets.GITHUB_TOKEN }}' \
+      #    --header 'content-type: application/json' \
+      #    --data '{
+      #      "title": "Automated issue for commit: ${{ github.sha }}",
+      #      "body": "This issue was automatically created by the GitHub Action workflow **${{ github.workflow }}**. \n\n The commit hash was: _${{ github.sha }}_."
+      #      }' \
+      #    --fail
+      
       # Commit and push all changed files.
       #- name: GIT Commit Build Artifacts (coverage, dist, devdist, docs)
       # Only run on main branch push (e.g. after pull request merge).
