@@ -19,3 +19,11 @@ jobs:
         run: cat ${{ github.workspace }}/Quellcode/code.c
       - run: echo "Hello World" > ${{ github.workspace }}/Quellcode/hello.txt
       - run: echo "🍏 This job's status is ${{ job.status }}."
+      - name: Commit changes
+        uses: EndBug/add-and-commit@v9
+        with:
+          author_name: Your Name
+          author_email: mail@example.com
+          message: 'Your commit message'
+          add: '*.c'
+  
