@@ -47,10 +47,10 @@ jobs:
       #      }' \
       #    --fail
       
-      # Commit and push all changed files.
-      - name: GIT Commit Build Artifacts (coverage, dist, devdist, docs)
-      # Only run on main branch push (e.g. after pull request merge).
-        if: github.event_name == 'push'
+      - name: GIT commit and push all changed files
+        env: 
+          CI_COMMIT_MESSAGE: Continuous Integration Build Artifacts
+          CI_COMMIT_AUTHOR: Continuous Integration
         run: |
           git config --global user.name "${{ env.CI_COMMIT_AUTHOR }}"
           git config --global user.email "username@users.noreply.github.com"
