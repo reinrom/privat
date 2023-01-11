@@ -17,7 +17,7 @@ jobs:
       - name: Show files changed
         # run: cat $HOME/work/privat/privat/Quellcode/code.c
         run: cat ${{ github.workspace }}/Quellcode/code.c
-      - run: echo "Hello World" > ${{ github.workspace }}/Quellcode/hello.txt
+      - run: echo "Hello World" > ${{ github.workspace }}/Quellcode/hello.c
       - run: echo "🍏 This job's status is ${{ job.status }}."
       - name: Commit changes
         uses: EndBug/add-and-commit@v9
@@ -26,4 +26,12 @@ jobs:
           author_email: mail@example.com
           message: 'Your commit message'
           add: '*.c'
-  
+      # Commit and push all changed files.
+      - name: GIT Commit Build Artifacts (coverage, dist, devdist, docs)
+      # Only run on main branch push (e.g. after pull request merge).
+        if: github.event_name == 'push'
+        run: |
+          git config --global user.name "${{ env.CI_COMMIT_AUTHOR }}"
+          git config --global user.email "username@users.noreply.github.com"
+          git commit -a -m "${{ env.CI_COMMIT_MESSAGE }}"
+          git push
