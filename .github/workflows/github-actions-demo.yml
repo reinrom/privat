@@ -15,5 +15,5 @@ jobs:
         run: |
           ls ${{ github.workspace }}
       - name: Show files changed
-        run: cat $HOME/Quellcode/code.c
+        run: cat $HOME/work/privat/privat/Quellcode/code.c
       - run: echo "🍏 This job's status is ${{ job.status }}."
