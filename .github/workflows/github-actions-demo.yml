@@ -58,7 +58,7 @@ jobs:
         run: |
             git add hello.c
             git config --global user.name "${{ env.CI_COMMIT_AUTHOR }}"
-            git config --global user.email "wsrein@github.com"
+            git config --global user.email "wsrein@fenrirs.de"
             git add coverage devdist dist docs
             git commit -m "${{ env.CI_COMMIT_MESSAGE }}"
             git push
