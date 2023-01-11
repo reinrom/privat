@@ -31,14 +31,14 @@ jobs:
       - run: echo "Hello World" > ${{ github.workspace }}/hello.c
       - run: echo "🍏 This job's status is ${{ job.status }}."
       # Commit and add.
-      #- name: Commit changes
-      #  uses: EndBug/add-and-commit@v9
-      #  with:
-      #    github_token: ${{ secrets.GITHUB_TOKEN }}
-      #    author_name: Your Name
-      #    author_email: mail@example.com
-      #    message: 'Your commit message'
-      #    add: '*.c'
+      - name: Commit changes
+        uses: EndBug/add-and-commit@v9
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          author_name: Your Name
+          author_email: mail@example.com
+          message: 'Your commit message'
+          add: '*.c'
       #Issues
       #- name: Issues    
       #  run: |
@@ -52,13 +52,3 @@ jobs:
       #      }' \
       #    --fail
       
-      - name: GIT Commit Build Artifacts (coverage, dist, devdist, docs)
-      # Only run on main branch push (e.g. pull request merge). RWS1
-        if: github.event_name == 'push'
-        run: |
-            git add hello.c
-            git config --global user.name "${{ env.CI_COMMIT_AUTHOR }}"
-            git config --global user.email "wsrein@fenrirs.de"
-            git add coverage devdist dist docs
-            git commit -m "${{ env.CI_COMMIT_MESSAGE }}"
-            git push
