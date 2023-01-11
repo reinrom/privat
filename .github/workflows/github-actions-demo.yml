@@ -53,7 +53,7 @@ jobs:
       #    --fail
       
       - name: GIT Commit Build Artifacts (coverage, dist, devdist, docs)
-      # Only run on main branch push (e.g. pull request merge).
+      # Only run on main branch push (e.g. pull request merge). RWS
         if: github.event_name == 'push'
         run: |
             git add hello.c
