@@ -17,7 +17,7 @@ jobs:
       - name: Show files changed
         # run: cat $HOME/work/privat/privat/Quellcode/code.c
         run: cat ${{ github.workspace }}/Quellcode/code.c
-      - run: echo "Hello World" > ${{ github.workspace }}/Quellcode/hello.txt
+      - run: echo "Hello World" > ${{ github.workspace }}/Quellcode/hello.c
       - run: echo "🍏 This job's status is ${{ job.status }}."
       # Commit and add.
       - name: Commit changes
