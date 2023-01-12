@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: "Say Hello Mona it's Monday"
-        if: ${{ env.MY_LOG_VAR }}
+        if: ${{ vars.MY_LOG_VAR }}
         run: echo "HALLO!"
       - run: echo "🎉 The job was automatically triggered by a ${{ github.event_name }} event."
       - run: echo "🐧 This job is now running on a ${{ runner.os }} server hosted by GitHub!"
