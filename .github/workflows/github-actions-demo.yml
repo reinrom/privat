@@ -1,8 +1,5 @@
 name: GitHub Actions Demo
 on: [push]
-env:
-  # Setting an environment variable with the value of a configuration variable
-  env_var: ${{ vars.MY_VAR_LOG }}
 permissions:
   actions: write
   pull-requests: write
@@ -31,6 +28,11 @@ jobs:
       - name: Show files changed
         # run: cat $HOME/work/privat/privat/Quellcode/code.c
         run: cat ${{ github.workspace }}/Quellcode/code.c
+      - shell: sh
+        run: cc ${{ github.workspace }}/Quellcode/code.c -o ./code
+      - name: List files in the repository2
+        run: |
+          ls ${{ github.workspace }}
       #- run: echo "Hello World" > ${{ github.workspace }}/Quellcode/hello.txt
       - run: echo "Hello World" > ${{ github.workspace }}/hello.c
       - shell: bash
