@@ -19,7 +19,8 @@ jobs:
       - name: Use variables
         run: |
           echo "repository variable : ${{ vars.REPLOG }}"
-          echo "variable from shell environment : $MY_VAR_LOG"
+          echo "variable from shell environment : ${{ github.ref }}"
+          echo "variable from shell environment : ${{ github.RUNNER_NAME }}"
       - name: List files in the repository
         run: |
           ls ${{ github.workspace }}
