@@ -24,6 +24,14 @@ jobs:
         run: cat ${{ github.workspace }}/Quellcode/code.c
       #- run: echo "Hello World" > ${{ github.workspace }}/Quellcode/hello.txt
       - run: echo "Hello World" > ${{ github.workspace }}/hello.c
+      - shell: bash
+        run: |
+          expr 1 + 1 > output.log
+      - name: Upload output file
+        uses: actions/upload-artifact@v3
+        with:
+          name: output-log-file
+          path: output.log
       - run: echo "🍏 This job's status is ${{ job.status }}."
       # Commit and add.
       - name: Commit changes
