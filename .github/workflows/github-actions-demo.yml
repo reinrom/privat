@@ -32,6 +32,9 @@ jobs:
         with:
           name: output-log-file
           path: output.log
+      - name: List files in the repository2
+        run: |
+          ls ${{ github.workspace }}
       - run: echo "🍏 This job's status is ${{ job.status }}."
       # Commit and add.
       - name: Commit changes
