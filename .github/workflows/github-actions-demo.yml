@@ -33,7 +33,6 @@ jobs:
       - name: List files in the repository2
         run: |
           ls ${{ github.workspace }}
-      - name: RunCode
       - shell: sh
         run: ./code
       #- run: echo "Hello World" > ${{ github.workspace }}/Quellcode/hello.txt
