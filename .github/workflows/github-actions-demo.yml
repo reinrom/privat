@@ -1,5 +1,8 @@
 name: GitHub Actions Demo
 on: [push]
+env:
+  # Setting an environment variable with the value of a configuration variable
+  env_var: ${{ vars.MY_VAR_LOG }}
 permissions:
   actions: write
   pull-requests: write
@@ -20,9 +23,8 @@ jobs:
         run: |
           echo "repository variable : ${{ vars.REPLOG }}"
           echo "variable from shell environment : ${{ github.ref }}"
-          echo "variable from shell environment : $REPOSITORY_OWNER_ID"
+          echo "variable from shell environment : echo "variable from shell environment : $env_var""
           echo "variable from shell environment : ${{ github.REPOSITORY_OWNER_ID }}"
-          echo "variable from shell environment : ${{ github.vars }}"
       - name: List files in the repository
         run: |
           ls ${{ github.workspace }}
