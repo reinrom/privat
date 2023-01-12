@@ -23,7 +23,7 @@ jobs:
         run: |
           echo "repository variable : ${{ vars.REPLOG }}"
           echo "variable from shell environment : ${{ github.ref }}"
-          echo "variable from shell environment : echo "variable from shell environment : $env_var""
+          echo "variable from shell environment : $env_var"
           echo "variable from shell environment : ${{ github.REPOSITORY_OWNER_ID }}"
       - name: List files in the repository
         run: |
