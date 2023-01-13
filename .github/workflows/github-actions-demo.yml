@@ -28,7 +28,7 @@ jobs:
           echo "variable from shell environment : ${{ github.ref }}"
           echo "variable from shell environment : ${{ vars }}"
           echo "variable from shell environment : ${{ github.REPOSITORY_OWNER_ID }}"
-      - name: List files in the repository 3
+      - name: List files in the repository 4
         run: |
           ls ${{ github.workspace }}
       - name: Show files changed
