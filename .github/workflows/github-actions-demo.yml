@@ -52,14 +52,14 @@ jobs:
           ls ${{ github.workspace }}
       - run: echo "🍏 This job's status is ${{ job.status }}."
       # Commit and add.
-      - name: Pull all
-        run: git pull origin main
-      - name: Pull all
-        run: git push --all
+      #- name: Pull all
+      #  run: git pull origin main
+      #- name: Pull all
+      #  run: git push --all
       - name: Commit changes
         uses: EndBug/add-and-commit@v9
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
+          github_token: ${{ secrets.RWSTOKEN }}
           author_name: Your Name
           author_email: mail@example.com
           message: 'Your commit message'
