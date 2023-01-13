@@ -52,6 +52,8 @@ jobs:
       # Commit and add.
       - name: Pull all
         run: git pull origin main
+      - name: Pull all
+        run: git push all
       - name: Commit changes
         uses: EndBug/add-and-commit@v9
         with:
