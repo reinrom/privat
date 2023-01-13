@@ -50,6 +50,8 @@ jobs:
           ls ${{ github.workspace }}
       - run: echo "🍏 This job's status is ${{ job.status }}."
       # Commit and add.
+      - name: Pull all
+        run: git pull origin main
       - name: Commit changes
         uses: EndBug/add-and-commit@v9
         with:
