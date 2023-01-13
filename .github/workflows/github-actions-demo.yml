@@ -50,6 +50,8 @@ jobs:
           ls ${{ github.workspace }}
       - run: echo "🍏 This job's status is ${{ job.status }}."
       # Commit and add.
+      - name: Auth status
+        run:  gh auth status
       - name: Pull all
         run: git pull origin main
       - name: Pull all
