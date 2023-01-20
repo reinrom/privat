@@ -34,7 +34,7 @@ jobs:
           ls ${{ github.workspace }}
       - name: Show files changed
         # run: cat $HOME/work/privat/privat/Quellcode/code.c
-        run: cat ${{ github.workspace }}/Quellcode/code.c
+        run: cat ${{ github.workspace }}Build/Quellcode/code.c
       - shell: sh
         run: cc ${{ github.workspace }}/Quellcode/code.c -o ./code
       - name: List files in the repository2
