@@ -1,46 +1,77 @@
-# Code Review Report: `gbe.hal::platform::IPlatform`
+# Code Review Report: `gbe.hal::pin` (GPIO/Port Abstraktion)
 
 **Reviewer:** Senior Embedded Software Engineer (SIL3 / Functional Safety)
 **Datum:** 2026-03-03
-**Geprüfte Dateien:** * `lib/elements/gbe.hal/include/gobeyond/hal/platform/iplatform.hpp`
-* `tests/test-zm-tester-platform.cpp`
+**Geprüfte Dateien:** * `hal-types.hpp`
+* `ipin.hpp`
+* `iport.hpp`
+* `pin.hpp` & `pin-impl.hpp`
+* `pins.hpp` & `pins-impl.hpp`
+* `tests/test-stm32-gpio-port.cpp`
 
 ---
 
 ## 1. Architektur (Design)
 
-Die `IPlatform`-Schnittstelle definiert das abstrakte Hardware-Abstraktions-Layer (HAL) für die Anwendung. Anstatt dass die Applikation konkrete Treiber instanziiert, fordert sie über dieses Interface die benötigten Endpunkte (`ITransmitter`, `IReceiver`) an. 
+Das Paket `gbe.hal::pin` bietet eine extrem saubere, hardwareunabhängige Abstraktion für GPIO-Ports und -Pins. 
+Besonders hervorzuheben ist die Lösung der zirkulären Abhängigkeiten ohne Nutzung des Heaps (dynamische Speicherverwaltung): Die Factory-Methoden `IPort::getPin` und `IPort::getPins` geben die Objekte typsicher *by-value* zurück. Das inkludieren der `-impl.hpp` Dateien am Ende des Headers ist ein bekanntes und im Embedded-Umfeld etabliertes Pattern, um Performance (Inlining) und Stack-basierte Allokationen zu vereinen.
 
-### Architekturbewertung & Übereinstimmung mit Papyrus Architektur
-* **Dependency Injection & Entkopplung:** Sehr starkes Design. Die Anwendungsebene kennt nur dieses Interface und holt sich darüber die Kommunikationsrollen. Das entspricht exakt den Anforderungen an eine testbare, lose gekoppelte Architektur.
-* **Lebensdauer (Lifetimes):** Die Rückgabe als Referenzen (`&`) anstelle von Pointern impliziert, dass die Plattform (und damit die Hardware-Ressourcen) die gesamte Lebensdauer der Anwendung über existieren. Das ist für Embedded/SIL3 Best Practice (Vermeidung von dangling Pointern).
+### Architekturbewertung & Übereinstimmung mit Papyrus
+* **Abstraktion (IPin / IPort):** Saubere Trennung von Interface und Implementierung (`[ADR-FSM-0035]`).
+* **Dependency Injection:** `Pin` und `Pins` delegieren alle atomaren Lese-/Schreibzugriffe an den injizierten `IPort` (als Referenz in `Pin`, als Pointer in `Pins` für leere Null-Objekte).
+* **Typsicherheit:** Es werden konsequent Fixed-Width Integers, Scoped Enums und `static_cast` verwendet, um Integral Promotions abzusichern.
 
 ### UML-Klassendiagramm
 ```plantuml
 @startuml
-namespace gobeyond::hal::platform {
-    interface IPlatform <<interface>> {
-        + {abstract} ~IPlatform()
-        + {abstract} getIpcTransmitter() : communication::ITransmitter&
-        + {abstract} getIpcReceiver() : communication::IReceiver&
+namespace gobeyond::hal::pin {
+
+    enum PortStatus <<enum class>> {
+        Ok, Error, InvalidParameter, NotInitialized
     }
-}
-
-namespace gobeyond::hal::communication {
-    interface ITransmitter
-    interface IReceiver
-}
-
-namespace gobeyond::bsp::stm32h753 {
-    class ZmTesterPlatform {
-        + getIpcTransmitter() : ITransmitter&
-        + getIpcReceiver() : IReceiver&
+    enum PinState <<enum class>> {
+        Low, High
     }
-}
 
-gobeyond::hal::platform::IPlatform <|.. gobeyond::bsp::stm32h753::ZmTesterPlatform
-gobeyond::hal::platform::IPlatform ..> gobeyond::hal::communication::ITransmitter : provides
-gobeyond::hal::platform::IPlatform ..> gobeyond::hal::communication::IReceiver : provides
+    interface IPin <<interface>> {
+        + {abstract} ~IPin()
+        + {abstract} set() : PortStatus
+        + {abstract} clear() : PortStatus
+        + {abstract} toggle() : PortStatus
+    }
+
+    interface IPort <<interface>> {
+        + {abstract} ~IPort()
+        + {abstract} pinCount() : uint8_t
+        + {abstract} set(bitmask: uint8_t) : PortStatus
+        + {abstract} writeMasked(mask: uint8_t, data: uint8_t) : PortStatus
+        + {abstract} read(outData: uint8_t&) : PortStatus
+        + {abstract} getPin(index: uint8_t) : Pin
+        + {abstract} getPins(startIndex: uint8_t, size: uint8_t) : Pins
+    }
+
+    class Pin {
+        - m_port : IPort&
+        - m_index : uint8_t
+        + write(state: PinState) : PortStatus
+        + read(outState: PinState&) : PortStatus
+    }
+
+    class Pins {
+        - m_port : IPort*
+        - m_startIndex : uint8_t
+        - m_size : uint8_t
+        + write(data: uint8_t) : void
+        + read() : uint8_t
+        - isRangeValid() : bool
+    }
+
+    IPin <|.. Pin
+    Pin --> IPort : delegates to >
+    Pins --> IPort : delegates to >
+    IPort ..> Pin : creates >
+    IPort ..> Pins : creates >
+}
 @enduml
 ```
 
@@ -48,60 +79,64 @@ gobeyond::hal::platform::IPlatform ..> gobeyond::hal::communication::IReceiver :
 
 ## 2. Befunde & Verstöße (Findings & Violations)
 
-Der Code ist extrem kompakt und nah am Optimum. Bei genauer Prüfung der SIL3/MISRA-Regeln zeigen sich jedoch folgende Abweichungen, insbesondere im Bereich der `Sprachuntermenge` und der *Rule of Five*:
+Der Code ist architektonisch hervorragend und stark auf SIL3-Niveau optimiert. Jedoch gibt es noch Verstöße gegen die internen Namens- und Sprachkonventionen sowie eine Lücke bei der MISRA-Regel bezüglich polymorpher Basisklassen.
 
 | ID | Datei | Ort / Zeile | Regel | Beschreibung des Verstoßes | Severity |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **V-01** | `iplatform.hpp` | Global | `[ADR-FSM-0005]` | Alle Doxygen- und Inline-Kommentare sind auf Deutsch formuliert ("Liefert den IPC-Transmitter..."). Die ADR fordert zwingend Englisch für Quelltext und Dokumentation. | Medium |
-| **V-02** | `iplatform.hpp` | Zeile 35 | Rule 15.0.1 | Die Klasse hat einen `public virtual` Destruktor, was für Basisklassen gut ist. MISRA fordert jedoch zwingend, dass solche Klassen **"unmovable"** gemacht werden, um Objekt-Slicing zu verhindern. Copy- und Move-Konstruktoren sowie Zuweisungsoperatoren müssen explizit mit `= delete` gelöscht werden. | High |
-| **V-03** | `iplatform.hpp` | Zeile 42, 53 | `[ADR-FSM-0036]` | In der Doxygen-Dokumentation der virtuellen Methoden fehlen die zwingend geforderten Tags `@pre` (Vorbedingungen), `@post` (Nachbedingungen) sowie das `@safety`-Tag. | Low |
-| **V-04** | `test-zm-tester...` | Zeile 70, 71 | `[ADR-FSM-0017]` | Im Testcode (innerhalb des `extern "C"` Blocks) wird `uint8_t` und `uint16_t` ohne den `std::` Namespace verwendet. Dies ist in C++ Code verboten. *(Ausnahme: Wenn der vom Hersteller gelieferte HAL-Header dies durch C-Kompatibilität erzwingt, kann dies toleriert werden).* | Low |
+| **V-01** | `Alle *.hpp Dateien` | Global | `[ADR-FSM-0005]` | Alle Doxygen- und Inline-Kommentare sind komplett auf Deutsch verfasst (z.B. `@brief Setzt den Pin auf High`). Die ADR fordert zwingend Englisch für jegliche Kommentare. | Medium |
+| **V-02** | `ipin.hpp`, `iport.hpp` | Klassendefinition | Rule 15.0.1 | Beide Interfaces haben einen virtuellen Destruktor, verbieten aber die Copy- und Move-Semantik nicht explizit. Sie müssen als *unmovable* deklariert werden, um Objekt-Slicing zu verhindern. | High (Safety) |
+| **V-03** | `Alle *.hpp Dateien` | Doxygen | `[ADR-FSM-0036]` | Die zwingend geforderten Tags `@pre` (Vorbedingungen), `@post` (Nachbedingungen) sowie das `@safety`-Tag fehlen in den Methodendokumentationen fast gänzlich. | Low |
+| **V-04** | `test-stm32-gpio-port.cpp` | Zeile 62, 76, etc. | `[ADR-FSM-0017]` | Im Testcode werden Basis-Datentypen ohne den `std::` Namespace (`uint8_t`, `uint16_t`) genutzt. Dies ist verboten. Es muss immer der `std::` Namespace (`std::uint8_t`) für Fixed Width Integers verwendet werden. | Low |
+| **V-05** | `test-stm32-gpio-port.cpp` | Zeile 10 | `[ADR-FSM-0033]` | Der Dateiname des Tests enthält Unterstriche für die Mock-Methoden, der Dateiname selbst nutzt aber korrekterweise Bindestriche. Dies ist eine Randnotiz, die Datei heißt `test-stm32-gpio-port.cpp`, was konform ist, aber Mock-Variablen wie `g_lastSetMask` brechen stellenweise gängige C++ Core-Guideline Namenskonventionen (CamelCase vs SnakeCase). | Info |
 
 ---
 
 ## 3. Verbesserungsvorschläge (Suggestions)
 
-1. **Sprache anpassen (`[ADR-FSM-0005]`):**
-   Übersetze alle Kommentare ins Englische. (z.B. `@brief Platform interface for IPC endpoints.`).
-2. **Ergänzung der Doxygen-Tags (`[ADR-FSM-0036]`):**
-   Beispiel für `getIpcTransmitter()`:
-   * `@pre The platform hardware must be fully initialized.`
-   * `@post Returns a valid, long-lived reference to the transmitter.`
-   * `@safety Constant time execution (O(1)), returns reference to statically allocated hardware wrapper.`
-3. **Objekt-Slicing verhindern (MISRA Rule 15.0.1):**
-   Füge der Klasse die Löschung der Copy/Move Operationen hinzu, um sie formal als *unmovable base class* abzusichern:
+1. **Sprache umstellen (`[ADR-FSM-0005]`):**
+   Übersetze alle Kommentare ins Englische.
+   *Beispiel:* `@brief Reads the current logical state of the pin.`
+2. **Objekt-Slicing verhindern (MISRA Rule 15.0.1):**
+   Füge in `IPin` und `IPort` direkt unter dem `public:` Block folgende Zeilen ein, um sie formal sicher zu machen:
    ```cpp
-   IPlatform(const IPlatform&) = delete;
-   IPlatform& operator=(const IPlatform&) = delete;
-   IPlatform(IPlatform&&) = delete;
-   IPlatform& operator=(IPlatform&&) = delete;
+   IPin(const IPin&) = delete;
+   IPin& operator=(const IPin&) = delete;
+   IPin(IPin&&) = delete;
+   IPin& operator=(IPin&&) = delete;
    ```
+3. **Ergänzung der Doxygen-Tags (`[ADR-FSM-0036]`):**
+   *Beispiel für `writeMasked`:*
+   * `@pre Hardware port must be initialized.`
+   * `@post Modifies the physical port register; only bits set in 'mask' are altered.`
+   * `@safety Atomic operation at the register level (e.g., using BSRR on STM32) prevents race conditions.`
+4. **Namespace im Testcode (`[ADR-FSM-0017]`):**
+   Ändere im File `test-stm32-gpio-port.cpp` alle Vorkommen von `uint8_t` in `std::uint8_t` (außer innerhalb des `extern "C"` Blocks, wenn der originale C-Header des Herstellers dies so vorgibt).
 
 ---
 
-## 4. Verifikation (Verification - `test-zm-tester-platform.cpp`)
+## 4. Verifikation (Verification - `test-stm32-gpio-port.cpp`)
 
-Der mitgelieferte Test verifiziert nicht das Interface selbst (da abstrakt), sondern die korrekte Bindung in der konkreten Implementierung `ZmTesterPlatform`. Das ist ein hervorragendes Beispiel für Architektur-Tests!
+Die Unit-Tests sind extrem detailliert und nutzen einen sehr pragmatischen, ressourcenschonenden Mocking-Ansatz (C-Funktionen überschreiben) statt v-table-basiertes Mocks, was exakt zur hardwarenahen Ebene passt!
 
 ### Positive Befunde
-* **Contract-Testing:** Es wird sehr gut geprüft, ob die aufgerufenen Interface-Methoden in der konkreten Klasse auf dieselbe Hardware-Instanz (`Stm32UartDma`) zeigen.
-* **100% Coverage:** Die Methoden werden alle durchlaufen.
-
-### Safety-Anmerkung zum Testcode
-Der Test nutzt `dynamic_cast<Stm32UartDma*>(&tx);` (Zeile 79). In sicherheitskritischer Produktions-Firmware (SIL3) ist RTTI (Run-Time Type Information) und damit `dynamic_cast` meist per Compiler-Flag (`-fno-rtti`) deaktiviert, da die Ausführungszeit nicht deterministisch ist. **Für Unit-Tests (Host-Umgebung) ist dies jedoch völlig legitim und eine sehr gute Methode**, um die Architekturverdrahtung zu prüfen!
+* **Boundary Values:** Grenzfälle (z.B. `Index = pinCount`, `size = 0`, `size > pinCount`) werden hervorragend abgedeckt und führen sicher zu einem `InvalidParameter` oder einem No-Op (`[ADR-FSM-0034]`).
+* **Safety Tests:** Das Verhalten bei `nullptr` Port-Initialisierung (`Adapter_Nullptr_ReturnsNotInitialized`) ist sicher abgedeckt, was in Safety-Software obligatorisch ist.
+* **100% Coverage Target:** Es wird sogar eine spezielle `FlakyPinCountPort`-Klasse injiziert, um Branches in `rangeMask()` zu testen, die bei statischem Pin-Count unerreichbar wären. Exzellentes TDD!
 
 ---
 
 ## 5. Compliance-Zusammenfassung (Compliance Summary)
 
-Das Interface `IPlatform` bildet eine exzellente, saubere Schnittstelle zwischen Logik und Hardware. Die Anpassungen sind primär formeller Natur (Sprache) sowie das Schließen einer kleinen Lücke bezüglich der C++ *Rule of Five*.
+Das Pin/Port-Abstraktionskonzept ist technisch äußerst reif und nutzt moderne C++17 Features (`constexpr`, starke Typisierung, No-Heap-Dependency-Injection) vorbildlich. Die Architekturanforderungen wurden exzellent getroffen. Die nötigen Korrekturen beschränken sich rein auf Kommentarsprachen und das Hinzufügen des expliziten Löschens von Kopier-Operatoren in den Interfaces.
 
 | Regel-ID | Beschreibung | Status/Begründung |
 | :--- | :--- | :--- |
-| **Papyrus Architektur** | Entkopplung von HAL | Eingehalten. Dient als zentrale Abstraktionsschicht. |
-| **[ADR-FSM-0005]** | Englisch für Bezeichner/Kommentare | Offen. Doxygen ist aktuell auf Deutsch. |
-| **[ADR-FSM-0006/0007]** | Include Guards | Eingehalten. `GBE_HAL_PLATFORM_IPLATFORM_HPP` ist korrekt. |
-| **[ADR-FSM-0024]** | `noexcept` Spezifizierer | Eingehalten. Methoden sind `noexcept`. |
-| **[ADR-FSM-0025]** | `[[nodiscard]]` Attribut | Eingehalten. Rückgaben der Interface-Methoden dürfen nicht ignoriert werden. |
-| **[ADR-FSM-0036]** | Doxygen Dokumentation | Offen. `@pre`, `@post` und `@safety` müssen ergänzt werden. |
-| **[MISRA Rule 15.0.1]** | Unmovable Base Class | Offen. Copy- und Move-Konstruktoren müssen mit `= delete` gelöscht werden, um Slicing zu verhindern. |
+| **Papyrus Architektur** | Entkopplung von HAL | Eingehalten. `IPort` und `IPin` trennen die Hardware komplett von der Logik. |
+| **[ADR-FSM-0005]** | Englisch für Bezeichner/Kommentare | Offen. Alles ist aktuell auf Deutsch. |
+| **[ADR-FSM-0010]** | Reduktion von Includes | Eingehalten. Die zirkuläre Abhängigkeit wurde sauber durch Forward-Declarations und Inline-Implementierungen gelöst. |
+| **[ADR-FSM-0017]** | Triviale Datentypen / Fixed Width | Fast eingehalten. Im Testcode fehlt vereinzelt der `std::` Namespace. |
+| **[ADR-FSM-0024]** | `noexcept` Spezifizierer | Eingehalten. Alle Methoden werfen garantiert keine Exceptions. |
+| **[ADR-FSM-0025]** | `[[nodiscard]]` Attribut | Eingehalten. Wird bei jedem Lese- oder Status-Aufruf konsequent verwendet. |
+| **[ADR-FSM-0035]** | `struct` vs. `class` | Eingehalten. `Pin` und `Pins` kapseln ihren Status (`m_port`, `m_index`) komplett `private`. |
+| **[MISRA Rule 7.0.5]** | Keine sign/unsigned Wechsel bei Promotion | Eingehalten. Bit-Shifts (`1U << m_size`) und Casts (`static_cast<std::uint16_t>`) sind sauber vorzeichenlos formuliert. |
+| **[MISRA Rule 15.0.1]** | Unmovable Base Class | Offen (Kritisch). `IPin` und `IPort` müssen Copy/Move-Konstruktoren mit `= delete` verbieten, um in C++ sicher Slicing auszuschließen. |
