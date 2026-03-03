@@ -1,56 +1,46 @@
-# Code Review Report: `gbe.safety::RingBuffer`
+# Code Review Report: `gbe.safety::debug::BufferedReporter` (bzw. `dev::debug`)
 
 **Reviewer:** Senior Embedded Software Engineer (SIL3 / Functional Safety)
 **Datum:** 2026-03-03
-**Geprüfte Dateien:** * `lib/elements/gbe.safety/include/gobeyond/safety/utility/ring_buffer.hpp`
-* `tests/test_ring_buffer.cpp`
+**Geprüfte Dateien:** * `lib/elements/gbe.safety/include/gobeyond/safety/debug/BufferedReporter.hpp` (Neu)
+* `BufferedReporter_alt.hpp` (Referenz / Alt)
+* *Architektur-Vorgabe (Papyrus PlantUML)*
 
 ---
 
 ## 1. Architektur (Design)
 
-Die `RingBuffer`-Komponente implementiert einen statischen, exceptionsfreien Ringpuffer, der für sicherheitskritische Systeme (SIL3) ausgelegt ist. Die Architektur fügt sich nahtlos in das Papyrus-Gesamtmodell ein, in dem der `BufferedReporter` den Puffer als asynchrones Bindeglied zum `ITransmitter` nutzt.
+Der `BufferedReporter` sammelt Log-Nachrichten, puffert diese asynchron in dem zuvor validierten `RingBuffer` und gibt sie zeichenweise aus. Der Vergleich zwischen der alten und neuen Code-Version zeigt, dass die neue Version (`BufferedReporter.hpp`) die Formatierungslogik deutlich vereinfacht hat, was den Speicherbedarf auf dem Stack reduziert und der Stabilität zugutekommt.
+
+Dennoch weisen **beide** Code-Versionen fundamentale Abweichungen zur vorgegebenen Papyrus-Architektur auf:
 
 ### Architekturbewertung & Übereinstimmung mit Papyrus Architektur
-* **Safety First (No Heap):** Die Verwendung von `std::array` mit Template-Parametern (`TSize`) garantiert, dass der Speicher zur Compile-Zeit berechnet wird und auf dem Stack oder im BSS-Segment liegt. Dynamische Speicherallokationen (Heap) sind ausgeschlossen (Konform zu MISRA / `[ADR-FSM-0035]`).
-* **Kapselung:** Die strikte Trennung von Lese- (`m_readIndex`) und Schreibindizes (`m_writeIndex`) ermöglicht eine robuste FIFO-Logik.
-* **Strategie-Pattern via Templates:** Das `OverflowStrategy`-Enum wird typsicher und ohne Laufzeit-Overhead als Template-Parameter aufgelöst (`if constexpr`). Dies erfüllt `[REQ-NEW-01]` ohne Interfaces oder virtuelle Methoden (`[REQ-07]`).
-
-### UML-Klassendiagramm (Kontext: Papyrus Architektur)
+1.  **Paket/Namespace Zuordnung:** Laut Papyrus-Modell liegt `BufferedReporter` im Paket `dev::debug`. Im Code liegt die Klasse jedoch im Namespace `gobeyond::safety::debug`. Das bricht die logische Architektur, da Logging/Debugging typischerweise nicht Teil des zertifizierten `safety`-Kerns ist, sondern im `dev`-Paket gekapselt wird.
+2.  **Abhängigkeits-Injektion vs. Vererbung (`ITransmitter`):**
+    Das Papyrus UML-Diagramm definiert eine strikte Komposition: `BufferedReporter *-- ITransmitter`. Der Reporter **besitzt/referenziert** also einen `ITransmitter` (aus dem `hal::communication` Paket) als privates Member (`- transmitter: ITransmitter`). 
+    Der vorliegende Code ignoriert das Interface `ITransmitter` völlig. Stattdessen wird eine rein virtuelle Methode `virtual void writeCharacter(...) = 0;` definiert, die den Nutzer zwingt, von `BufferedReporter` zu erben. Dies verletzt das vorgegebene Design. 
+### Korrigiertes Ziel-Design (gemäß Papyrus)
 ```plantuml
 @startuml
-package gbe.safety.utility {
-    enum OverflowStrategy <<enum class>> {
-        DiscardNew
-        OverwriteOldest
-    }
-
-    class RingBuffer<T, TSize, Strategy> {
-        + {static} capacity_value : std::size_t
-        + {static} overflow_strategy : OverflowStrategy
-        - m_buffer : std::array<T, TSize>
-        - m_readIndex : std::size_t
-        - m_writeIndex : std::size_t
-        - m_isFull : bool
+namespace gobeyond::dev::debug {
+    class BufferedReporter<TBufferSize, TTraits, TMessage> {
+        - m_buffer : safety::utility::RingBuffer
+        - m_transmitter : hal::communication::ITransmitter&
         --
-        + <<constexpr>> RingBuffer()
-        + put(item: T const&) : bool
-        + get(outItem: T&) : bool
-        + reset() : void
-        + <<constexpr>> empty() : bool
-        + <<constexpr>> full() : bool
-        + <<constexpr>> capacity() : std::size_t
-        + size() : std::size_t
-        + available() : std::size_t
+        + BufferedReporter(transmitter: ITransmitter&)
+        + isRelevant(...) : bool
+        + report(...) : void
+        + printCharacter() : bool
+        - writeCharacter(data: uint8_t) : void
+        - convertMessage(...) : void
+        - storeInBuffer(...) : void
     }
-    RingBuffer ..> OverflowStrategy : uses
 }
-
-package gbe.dev.debug {
-    class BufferedReporter
-}
-
-BufferedReporter --> RingBuffer : uses internally
+note bottom of gobeyond::dev::debug::BufferedReporter
+  Must use Composition for ITransmitter 
+  instead of pure virtual inheritance!
+  Must be moved to namespace dev::debug.
+end note
 @enduml
 ```
 
@@ -58,67 +48,57 @@ BufferedReporter --> RingBuffer : uses internally
 
 ## 2. Befunde & Verstöße (Findings & Violations)
 
-Der Code ist funktional exzellent durchdacht. Die C++17-Features (`if constexpr`, `std::is_trivially_copyable_v`) wurden zielgerichtet eingesetzt. Dennoch gibt es bezüglich der strikten *Coding Guidelines* (`Sprachuntermenge.txt`) und im Bereich der Unit-Tests einige Verstöße:
+Neben den Architektur-Abweichungen gibt es signifikante Konflikte mit den MISRA-Sicherheitsregeln für C-Bibliotheken:
 
 | ID | Datei | Ort / Zeile | Regel | Beschreibung des Verstoßes | Severity |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **V-01** | `ring_buffer.hpp` | Global | `[ADR-FSM-0005]` | Alle Kommentare im Quelltext sind auf Deutsch verfasst (z.B. `// Schreiben an Schreib-Position`). Die ADR fordert zwingend: "Quelltextkommentare sind in Englisch zu verfassen." | Medium |
-| **V-02** | `ring_buffer.hpp` | Zeile 32 | `[ADR-FSM-0018]` | Das Scoped Enum `OverflowStrategy` hat keinen explizit definierten Underlying Type (z.B. `: std::uint8_t`). | Medium |
-| **V-03** | `ring_buffer.hpp` | Doxygen | `[ADR-FSM-0036]` | Es fehlen in der Methoden-Dokumentation die zwingend geforderten Tags `@pre` (Vorbedingungen), `@post` (Nachbedingungen) sowie das `@safety`-Tag (aus dem System Prompt). | Low |
-| **V-04** | `test_ring_buffer.cpp` | Zeile 38, 48, etc. | `[ADR-FSM-0017]` | Im Testcode wird der Basis-Datentyp `int` für das Template (z.B. `RingBuffer<int, 3>`) und für Variablen (`int val = 123;`) verwendet. Die ADR verbietet die Nutzung von `int` strikt und fordert Fixed Width Integers wie `std::int32_t`. | High |
-| **V-05** | `ring_buffer.hpp` | Zeile 105, 137 | Rule 7.0.5 | *Best Practice / Advisory:* Die Addition `(m_writeIndex + 1)` addiert ein signed Literal (`1`) zu einem unsigned `std::size_t`. Dies wird zwar durch *Exception 1* der Rule 7.0.5 gedeckt (da `1` positiv und konstant ist), in sicherheitskritischem Code sollte das Literal jedoch explizit unsigned sein (`1U`), um implizite Promotions vollständig zu vermeiden. | Low |
+| **V-01** | `BufferedReporter.hpp` | Global | Papyrus Architektur | **Architektur-Verstoß:** Falscher Namespace (`safety::debug` statt `dev::debug`) und fehlende Komposition des `ITransmitter` Interfaces. | High |
+| **V-02** | `BufferedReporter.hpp` | Zeile 3, 4 | `[ADR-FSM-0007]` | Der Include-Guard Name lautet `GOBEYOND_SAFETY_...` statt dem in ADR-FSM-0007 geforderten Format `<PROJECT>_<PATH>_<FILE>_HPP` (z.B. `GBE_DEV_DEBUG_BUFFERED_REPORTER_HPP`). | Low |
+| **V-03** | `BufferedReporter.hpp` | Zeile 75 | Rule 30.0.1 | Verwendung von `std::snprintf` aus `<cstdio>`. Die C Library Input/Output Funktionen sind in SIL3/MISRA strikt verboten. | High (Safety) |
+| **V-04** | `BufferedReporter.hpp` | Zeile 114 | Rule 24.5.2 | Verwendung von `std::memcpy` und `std::strlen` aus `<cstring>`. Die String-Handling-Funktionen der C-Bibliothek dürfen nicht genutzt werden. | High |
+| **V-05** | `BufferedReporter.hpp` | Zeile 93 | `[ADR-FSM-0025]` | Die Methode `printCharacter()` gibt einen `bool` zurück, der für den Aufrufer hochrelevant ist (um zu wissen, ob der Puffer leer ist). Das Attribut `[[nodiscard]]` fehlt. | Medium |
+| **V-06** | `BufferedReporter.hpp` | Doxygen | `[ADR-FSM-0036]` | Es fehlen `@pre` (Vorbedingungen) und `@post` (Nachbedingungen) in der Doxygen-Dokumentation der einzelnen Methoden. | Low |
 
 ---
 
 ## 3. Verbesserungsvorschläge (Suggestions)
 
-Um vollständige Compliance mit der `Sprachuntermenge.txt` und dem MISRA-Standard herzustellen, müssen folgende Anpassungen vorgenommen werden:
+Um den Code an die Papyrus-Architektur anzupassen und SIL3-konform zu machen, sind folgende Refactorings notwendig:
 
-1. **Sprache der Kommentare (`[ADR-FSM-0005]`):**
-   Übersetze alle Inline-Kommentare und Doxygen-Blöcke ins Englische. (Bspw.: `/// Lese-Index: Position...` -> `/// Read index: Position of the next element to be read.`).
-2. **Explicit Underlying Type für Enum (`[ADR-FSM-0018]`):**
-   Ergänze den Typ beim Enum: `enum class OverflowStrategy : std::uint8_t { ... };`.
-3. **Doxygen-Ergänzungen (`[ADR-FSM-0036]`):**
-   Füge den Funktionen `@pre` und `@post` hinzu. 
-   Beispiel für `put()`: 
-   * `@pre The type T must be initialized.` 
-   * `@post The item is added to the buffer if capacity allows it, or the oldest item is overwritten based on the Strategy.`
-   * `@safety Constant time execution O(1), no dynamic memory allocation.`
-4. **Vermeidung von Signed-Literalen (MISRA 7.0.5):**
-   Ändere `(this->m_writeIndex + 1) % TSize` in `(this->m_writeIndex + 1U) % TSize`. (Ebenso für `m_readIndex`).
+1. **Namespace & Ordnerstruktur anpassen:**
+   Verschiebe die Datei physikalisch nach `lib/elements/gbe.dev/include/gobeyond/dev/debug/` und ändere den Namespace auf `namespace gobeyond::dev::debug`. Passe den Include Guard entsprechend an (`#ifndef GBE_DEV_DEBUG_BUFFERED_REPORTER_HPP`).
+2. **Architektur-Korrektur (Abhängigkeitsinjektion statt Vererbung):**
+   Entferne die pure virtuelle Methode `virtual void writeCharacter(...)`. Übergib stattdessen eine Referenz auf `ITransmitter` im Konstruktor des `BufferedReporter` und speichere sie als Member (z.B. `hal::communication::ITransmitter& m_transmitter;`). `printCharacter()` ruft dann `m_transmitter.transmitByte(c)` auf. Dies entspricht exakt der UML-Vorgabe.
+3. **MISRA C-Library Ersatz (Rules 24.5.2 & 30.0.1):**
+   * **`std::memcpy`:** Ersetzen durch `std::copy_n` aus `<algorithm>` oder Schleifen.
+   * **`std::strlen`:** Ersetzen durch die Längen-Information aus `std::string_view` oder durch manuelles Zählen (C++ basierend).
+   * **`std::snprintf`:** Hierfür muss zwingend ein **Deviation Request (Abweichungsantrag)** verfasst werden, falls es aus Performance-/Codegrößen-Gründen unumgänglich ist, da MISRA Rule 30.0.1 `<cstdio>` verbietet. Alternativ muss auf moderne, sichere C++-Formatierung (wie `std::to_chars` für Zahlen) ausgewichen werden.
+4. **`[[nodiscard]]` ergänzen:** Füge `[[nodiscard]]` zur Signatur von `printCharacter()` hinzu.
 
 ---
 
-## 4. Verifikation (Verification - `test_ring_buffer.cpp`)
+## 4. Verifikation (Verification - Missing Unit Tests)
 
-Die Unit-Tests in `test_ring_buffer.cpp` (Google Test) weisen eine ausgezeichnete Struktur auf und decken auch das deterministische Wrap-Around-Verhalten sowie die Strategien ab `[ADR-FSM-0034]`.
+Aktuell liegen keine Unit Tests für den `BufferedReporter` vor. Zur Erfüllung der Vorgaben `[ADR-FSM-0034]` und `[ADR-FSM-0038]` müssen diese per TDD erstellt werden.
 
-### Positive Befunde
-* Boundary Values und logische Extremfälle (Buffer Full, Buffer Empty, Overwrite) sind abgedeckt.
-* Die `[[nodiscard]]`-Warnungen wurden durch `EXPECT_TRUE/FALSE` korrekt aufgelöst.
-* Tests mit Custom Structs (`Data`) stellen sicher, dass komplexere Datentypen (sofern sie *trivially copyable* sind) verarbeitet werden können.
-
-### Lücken & Vorschläge für die Tests
-* **Typ-Korrektur:** Der gravierendste Fehler im Test ist die Verwendung von `int` (`[ADR-FSM-0017]`). **Alle** Vorkommen von `int` müssen durch `std::int32_t` (und `#include <cstdint>`) ersetzt werden.
-* **`uint32_t` Namespace:** Das Struct `Data` nutzt `uint32_t id;`. Laut Regelwerk muss der Namespace explizit angegeben werden: `std::uint32_t id;`.
-* **Grenzwerte (Zero-Capacity):** Da `TSize > 0` durch ein `static_assert` gefordert wird, sollte ein Compile-Failure-Test (falls das Build-System dies unterstützt) sicherstellen, dass `RingBuffer<std::int32_t, 0>` tatsächlich zur Compile-Zeit fehlschlägt.
+### Zwingend zu erstellende Test-Szenarien:
+* **Mocking:** Das `ITransmitter`-Interface (nach Umbau auf Komposition) muss in GTest über GoogleMock (`MockTransmitter`) gemockt werden. So kann verifiziert werden, dass `printCharacter()` exakt die gepufferten Bytes an die HAL schickt.
+* **Puffer-Überlauf (Boundary Values):** Testen, was passiert, wenn `report()` mehr Daten in den `RingBuffer` schreibt, als dieser fassen kann. Verhält er sich konform zur im `RingBuffer` definierten `OverflowStrategy`?
+* **Formatierungs-Test:** Verifizieren, dass der aus dem `RingBuffer` gelesene String exakt das Format `[Zeit] - [Level]: [Message]\r\n` aufweist und nicht über die `MAX_TEMP_BUFFER`-Grenze hinausschießt.
 
 ---
 
 ## 5. Compliance-Zusammenfassung (Compliance Summary)
 
-Die `RingBuffer`-Klasse ist ein exzellentes Beispiel für sicheres Embedded C++ und stellt eine ideale Basis für den `BufferedReporter` dar. Die Speicher- und Ausnahmesicherheit ist zu 100 % gewährleistet. Die Verstöße sind rein formeller Natur (Kommentarsprache, Typ-Aliase im Test).
+Die neue Version (`BufferedReporter.hpp`) ist schlanker als `BufferedReporter_alt.hpp`, da sie komplexe dynamische Argumente aus dem `snprintf` entfernt hat. Der wichtigste nächste Schritt ist jedoch die **Synchronisation mit der Papyrus-Architektur** (Komposition statt Vererbung) sowie das Entfernen der C-Standardbibliotheken.
 
 | Regel-ID | Beschreibung | Status/Begründung |
 | :--- | :--- | :--- |
-| **[ADR-FSM-0005]** | Englisch für Bezeichner und Kommentare | Offen. Deutsche Kommentare müssen übersetzt werden. |
-| **[ADR-FSM-0006/0007]** | Include Guards + `#pragma once` | Eingehalten. `GBE_SAFETY_UTILITY_RING_BUFFER_HPP` ist korrekt definiert. |
-| **[ADR-FSM-0013]** | Nutzung von `static_assert` | Eingehalten. Es wird zur Compile-Zeit geprüft, ob `TSize > 0` ist und ob `T` kopierbar ist. |
-| **[ADR-FSM-0017]** | Triviale Datentypen / Fixed Width | Offen. Im Testfile wird `int` verwendet, was strengstens verboten ist. |
-| **[ADR-FSM-0018]** | Strongly-typed Enums | Offen. Bei `OverflowStrategy` fehlt der Underlying Type. |
-| **[ADR-FSM-0024]** | `noexcept` Spezifizierer | Eingehalten. Alle Methoden sind konsequent als `noexcept` deklariert. |
-| **[ADR-FSM-0025]** | `[[nodiscard]]` Attribut | Eingehalten. Alle Return-Werte zwingen den Aufrufer zur Fehlerbehandlung. |
-| **[ADR-FSM-0027]** | `constexpr` Funktionen | Eingehalten. Getter und Konstruktoren sind `constexpr`. |
-| **[ADR-FSM-0036]** | Doxygen / Dokumentation | Offen. `@safety`, `@pre` und `@post` Tags müssen ergänzt werden. |
-| **[MISRA Rule 7.0.5]** | Keine sign/unsigned Wechsel bei Promotion | Gedeckt durch Exception 1. Sollte als Best-Practice dennoch auf `1U` umgestellt werden. |
-| **[MISRA Rule 11.6.1]** | Initialisierung aller Variablen | Eingehalten. Member Initialization List im Konstruktor initialisiert `m_buffer{}` und alle Indizes komplett. |
+| **Papyrus Architektur** | Modul-Zugehörigkeit & Komposition | Offen (Kritisch). Falscher Namespace (`safety` statt `dev`) und fehlende Nutzung des `ITransmitter` Interfaces via Dependency Injection. |
+| **[ADR-FSM-0005]** | Englisch für Bezeichner/Kommentare | Eingehalten. Kommentare und Code sind in Englisch. |
+| **[ADR-FSM-0006/0007]** | Include Guards + `#pragma once` | Offen. Format des Include Guards entspricht nicht der Namenskonvention. |
+| **[ADR-FSM-0024]** | `noexcept` Spezifizierer | Eingehalten. `report` und interne Helfer sind sauber als `noexcept` markiert. |
+| **[ADR-FSM-0025]** | `[[nodiscard]]` Attribut | Offen. Fehlt bei `printCharacter()`. |
+| **[ADR-FSM-0036]** | Doxygen Dokumentation | Offen. `@pre` und `@post` Tags fehlen in der Methodenbeschreibung. |
+| **[MISRA Rule 24.5.2]** | Verbot von `<cstring>` | Offen (Kritisch). Nutzung von `memcpy` und `strlen` ist verboten. |
+| **[MISRA Rule 30.0.1]** | Verbot von `<cstdio>` | Offen (Kritisch). Die Nutzung von `std::snprintf` ist verboten. Hier ist entweder ein Refactoring oder ein formaler Deviation-Request notwendig. |
