@@ -13,7 +13,7 @@ Die `StringBuffer`-Komponente stellt einen statisch allokierten (Stack/BSS) Spei
 
 ### Architekturbewertung
 * **Safety First (No Heap):** Die Entscheidung, den Puffer über das Template-Argument `TBufferSize` statisch zu definieren, ist für ein SIL3-System hervorragend. Es verhindert dynamische Speicherzuweisungen (`new`/`malloc`) komplett.
-* **C-Library-Abhängigkeiten:** Die Klasse baut stark auf C-Bibliotheken (`<cstring>`, `<cstdio>`) auf. Dies steht in einem harten Kon^ikt zu modernen C++ Safety-Standards (MISRA), da C-String-Funktionen und `snprintf` keine Typsicherheit auf C++-Ebene bieten und häufig zu *Undefined Behavior* führen.
+* **C-Library-Abhängigkeiten:** Die Klasse baut stark auf C-Bibliotheken (`<cstring>`, `<cstdio>`) auf. Dies steht in einem harten Konflikt zu modernen C++ Safety-Standards (MISRA), da C-String-Funktionen und `snprintf` keine Typsicherheit auf C++-Ebene bieten und häufig zu *Undefined Behavior* führen.
 
 ### UML-Klassendiagramm
 ```plantuml
