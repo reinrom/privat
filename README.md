@@ -1,142 +1,80 @@
-# Code Review Report: `gbe.hal::pin` (GPIO/Port Abstraktion)
+# Code Review Report: `gbe.hal::pin` vs. Papyrus Architektur
 
 **Reviewer:** Senior Embedded Software Engineer (SIL3 / Functional Safety)
 **Datum:** 2026-03-03
-**Geprüfte Dateien:** * `hal-types.hpp`
-* `ipin.hpp`
-* `iport.hpp`
-* `pin.hpp` & `pin-impl.hpp`
-* `pins.hpp` & `pins-impl.hpp`
-* `tests/test-stm32-gpio-port.cpp`
+**Geprüfte Artefakte:** * Quellcode (`ipin.hpp`, `iport.hpp`, `pin.hpp`, `pins.hpp`)
+* Papyrus Architektur-Diagramm `image_5476b8.png`
 
 ---
 
-## 1. Architektur (Design)
+## 1. Architektur (Design) & Abgleich mit Papyrus
 
-Das Paket `gbe.hal::pin` bietet eine extrem saubere, hardwareunabhängige Abstraktion für GPIO-Ports und -Pins. 
-Besonders hervorzuheben ist die Lösung der zirkulären Abhängigkeiten ohne Nutzung des Heaps (dynamische Speicherverwaltung): Die Factory-Methoden `IPort::getPin` und `IPort::getPins` geben die Objekte typsicher *by-value* zurück. Das inkludieren der `-impl.hpp` Dateien am Ende des Headers ist ein bekanntes und im Embedded-Umfeld etabliertes Pattern, um Performance (Inlining) und Stack-basierte Allokationen zu vereinen.
+Dein Quellcode spiegelt das bereitgestellte Papyrus-Modell in den Kernkonzepten hervorragend wider. Die UML-Notizen wurden vom Entwickler (dir) aufmerksam gelesen und umgesetzt. Dennoch offenbart der Code, wie in deinen eigenen `TODO`-Kommentaren bereits richtig erkannt, eine Vermischung von abstrakter Architektur und hardwarespezifischen Details (Leaky Abstraction).
 
-### Architekturbewertung & Übereinstimmung mit Papyrus
-* **Abstraktion (IPin / IPort):** Saubere Trennung von Interface und Implementierung (`[ADR-FSM-0035]`).
-* **Dependency Injection:** `Pin` und `Pins` delegieren alle atomaren Lese-/Schreibzugriffe an den injizierten `IPort` (als Referenz in `Pin`, als Pointer in `Pins` für leere Null-Objekte).
-* **Typsicherheit:** Es werden konsequent Fixed-Width Integers, Scoped Enums und `static_cast` verwendet, um Integral Promotions abzusichern.
+### Exakte Übereinstimmungen mit dem Papyrus-Modell
+1. **Datentypen & Template-Verzicht:** Die UML-Notiz *"Hier alles mit std::uint8_t, weil Template Parameter irgendwie Tricky sind"* wurde zu 100 % eingehalten. Der Code nutzt konsequent `std::uint8_t` statt Templates für die Breite der Ports (`[ADR-FSM-0017]`).
+2. **Assoziationen & Kapselung:**
+   * `Pin` erfordert zwingend einen Port (`1` im UML). Im Code gelöst durch eine Referenz `IPort& m_port`. Perfekt!
+   * `Pins` hat einen optionalen Port (`0..1` im UML). Im Code gelöst durch einen Pointer `IPort* m_port`, der im Default-Konstruktor `nullptr` ist. Exakte Abbildung!
+3. **Interface-Anpassung:** Die Notiz *"Umbenennen der Memberfunktionen, so dass auf IPin passt"* wurde korrekt durch die direkte Vererbung `class Pin final : public IPin` und die Implementierung von `set()`, `clear()`, und `toggle()` erfüllt.
 
-### UML-Klassendiagramm
-```plantuml
-@startuml
-namespace gobeyond::hal::pin {
+### Der Architektur-Konflikt: Das überladene `IPort` Interface
+Laut Papyrus-Diagramm hat `IPort` exakt 5 Methoden:
+* `set(bitmask: TBitmask)`
+* `read(): TBitmask`
+* `getPin(index: uint8_t): Pin`
+* `getPins(startIndex: uint8_t, size: uint8_t, result: Pins)`
+* `toggle(bitmask: TBitmask)`
 
-    enum PortStatus <<enum class>> {
-        Ok, Error, InvalidParameter, NotInitialized
-    }
-    enum PinState <<enum class>> {
-        Low, High
-    }
+Im **Quellcode** (`iport.hpp`) hast du jedoch zusätzliche Methoden definiert:
+* `pinCount()`, `writeMasked()`, `lock()`, `read(outData)` und einen weiteren `getPins`-Overload.
 
-    interface IPin <<interface>> {
-        + {abstract} ~IPin()
-        + {abstract} set() : PortStatus
-        + {abstract} clear() : PortStatus
-        + {abstract} toggle() : PortStatus
-    }
 
-    interface IPort <<interface>> {
-        + {abstract} ~IPort()
-        + {abstract} pinCount() : uint8_t
-        + {abstract} set(bitmask: uint8_t) : PortStatus
-        + {abstract} writeMasked(mask: uint8_t, data: uint8_t) : PortStatus
-        + {abstract} read(outData: uint8_t&) : PortStatus
-        + {abstract} getPin(index: uint8_t) : Pin
-        + {abstract} getPins(startIndex: uint8_t, size: uint8_t) : Pins
-    }
-
-    class Pin {
-        - m_port : IPort&
-        - m_index : uint8_t
-        + write(state: PinState) : PortStatus
-        + read(outState: PinState&) : PortStatus
-    }
-
-    class Pins {
-        - m_port : IPort*
-        - m_startIndex : uint8_t
-        - m_size : uint8_t
-        + write(data: uint8_t) : void
-        + read() : uint8_t
-        - isRangeValid() : bool
-    }
-
-    IPin <|.. Pin
-    Pin --> IPort : delegates to >
-    Pins --> IPort : delegates to >
-    IPort ..> Pin : creates >
-    IPort ..> Pins : creates >
-}
-@enduml
-```
+Wie du in deinem `TODO` bereits treffend angemerkt hast, vermischen sich hier reine UML-Design-Methoden mit STM32-spezifischen Hardware-Anforderungen. Das Interface ist dadurch "aufgebläht" (Verletzung des *Interface Segregation Principles*).
 
 ---
 
 ## 2. Befunde & Verstöße (Findings & Violations)
 
-Der Code ist architektonisch hervorragend und stark auf SIL3-Niveau optimiert. Jedoch gibt es noch Verstöße gegen die internen Namens- und Sprachkonventionen sowie eine Lücke bei der MISRA-Regel bezüglich polymorpher Basisklassen.
+Der Abgleich zwischen Code und UML-Bild zeigt folgende strukturelle Befunde:
 
-| ID | Datei | Ort / Zeile | Regel | Beschreibung des Verstoßes | Severity |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **V-01** | `Alle *.hpp Dateien` | Global | `[ADR-FSM-0005]` | Alle Doxygen- und Inline-Kommentare sind komplett auf Deutsch verfasst (z.B. `@brief Setzt den Pin auf High`). Die ADR fordert zwingend Englisch für jegliche Kommentare. | Medium |
-| **V-02** | `ipin.hpp`, `iport.hpp` | Klassendefinition | Rule 15.0.1 | Beide Interfaces haben einen virtuellen Destruktor, verbieten aber die Copy- und Move-Semantik nicht explizit. Sie müssen als *unmovable* deklariert werden, um Objekt-Slicing zu verhindern. | High (Safety) |
-| **V-03** | `Alle *.hpp Dateien` | Doxygen | `[ADR-FSM-0036]` | Die zwingend geforderten Tags `@pre` (Vorbedingungen), `@post` (Nachbedingungen) sowie das `@safety`-Tag fehlen in den Methodendokumentationen fast gänzlich. | Low |
-| **V-04** | `test-stm32-gpio-port.cpp` | Zeile 62, 76, etc. | `[ADR-FSM-0017]` | Im Testcode werden Basis-Datentypen ohne den `std::` Namespace (`uint8_t`, `uint16_t`) genutzt. Dies ist verboten. Es muss immer der `std::` Namespace (`std::uint8_t`) für Fixed Width Integers verwendet werden. | Low |
-| **V-05** | `test-stm32-gpio-port.cpp` | Zeile 10 | `[ADR-FSM-0033]` | Der Dateiname des Tests enthält Unterstriche für die Mock-Methoden, der Dateiname selbst nutzt aber korrekterweise Bindestriche. Dies ist eine Randnotiz, die Datei heißt `test-stm32-gpio-port.cpp`, was konform ist, aber Mock-Variablen wie `g_lastSetMask` brechen stellenweise gängige C++ Core-Guideline Namenskonventionen (CamelCase vs SnakeCase). | Info |
+| ID | Ort / Klasse | Regel | Beschreibung des Verstoßes | Severity |
+| :--- | :--- | :--- | :--- | :--- |
+| **V-01** | `IPort` | Papyrus Architektur | **Leaky Abstraction:** Methoden wie `lock()` oder `writeMasked()` sind STM32-spezifisch und tauchen im Papyrus-UML nicht auf. Das abstrakte Interface kennt diese Hardware-Details laut Architektur nicht. | High |
+| **V-02** | `IPort` | Papyrus Architektur | Die Methode `getPins` ist im UML explizit mit dem Out-Parameter `result: Pins` spezifiziert. Im Code gibt es zusätzlich einen Overload, der `Pins` per Copy-Return zurückgibt. (Dies ist in modernem C++ zwar eleganter, weicht aber vom UML ab). | Low |
+| **V-03** | `Pin` | Papyrus Architektur | Die Klasse `Pin` hat im Code zusätzlich die Methoden `write(PinState)` und `read(PinState&)`. Diese existieren im Papyrus-Modell für `Pin` nicht (dort gibt es nur `set` und `toggle`, sowie implizit `clear` über `IPin`). | Medium |
+| **V-04** | `Pins` | Papyrus Architektur | Die Signatur im UML für `Pins` lautet `- start_index: uint8_t`. Im Code heißt die Variable `m_startIndex` (CamelCase statt Snake_Case). | Info |
+
+*(Hinweis: Die MISRA-Befunde aus der vorherigen Analyse wie fehlendes `= delete` in `IPort`/`IPin` und deutsche Doxygen-Kommentare bleiben natürlich bestehen).*
 
 ---
 
 ## 3. Verbesserungsvorschläge (Suggestions)
 
-1. **Sprache umstellen (`[ADR-FSM-0005]`):**
-   Übersetze alle Kommentare ins Englische.
-   *Beispiel:* `@brief Reads the current logical state of the pin.`
-2. **Objekt-Slicing verhindern (MISRA Rule 15.0.1):**
-   Füge in `IPin` und `IPort` direkt unter dem `public:` Block folgende Zeilen ein, um sie formal sicher zu machen:
-   ```cpp
-   IPin(const IPin&) = delete;
-   IPin& operator=(const IPin&) = delete;
-   IPin(IPin&&) = delete;
-   IPin& operator=(IPin&&) = delete;
-   ```
-3. **Ergänzung der Doxygen-Tags (`[ADR-FSM-0036]`):**
-   *Beispiel für `writeMasked`:*
-   * `@pre Hardware port must be initialized.`
-   * `@post Modifies the physical port register; only bits set in 'mask' are altered.`
-   * `@safety Atomic operation at the register level (e.g., using BSRR on STM32) prevents race conditions.`
-4. **Namespace im Testcode (`[ADR-FSM-0017]`):**
-   Ändere im File `test-stm32-gpio-port.cpp` alle Vorkommen von `uint8_t` in `std::uint8_t` (außer innerhalb des `extern "C"` Blocks, wenn der originale C-Header des Herstellers dies so vorgibt).
+Um den Konflikt zwischen der reinen UML-Architektur und der harten STM32-Realität aufzulösen, stehen euch zwei Wege offen. Da du der Entwickler bist, musst du dies mit dem Software-Architekten abstimmen:
+
+### Option A: Das UML-Modell an die Hardware-Realität anpassen (Empfohlen)
+Die Methode `writeMasked()` ist absolut essenziell, um auf Bare-Metal-Ebene (STM32 BSRR-Register) atomare, thread-sichere Zugriffe zu garantieren.
+* **Aktion:** Aktualisiert das Papyrus-Modell. Fügt `writeMasked` und `pinCount` zum `IPort` Interface hinzu.
+* **Warum?** Weil eine HAL, die nicht atomar schreiben kann, in einem Safety-System (SIL3) wertlos ist. `writeMasked` ist das sicherste Mittel gegen Race-Conditions an GPIOs.
+
+### Option B: Strikte Trennung durch Interface Segregation
+Wenn das Papyrus-Modell sakrosankt ist und nicht geändert werden darf, musst du die STM32-Spezifika aus dem `IPort` herauslösen.
+* **Aktion:** Das `IPort` wird genau auf die 5 UML-Methoden reduziert. Für `lock()` und Co. erstellst du ein separates, STM32-spezifisches Interface (z.B. `IStm32HardwarePort`), welches dann nur in der BSP-Ebene implementiert wird.
+
+### Kurzfristige Code-Anpassungen für 100% UML-Konformität:
+1. **`getPins` Out-Parameter:** Die UML definiert `+ getPins(in startIndex, in size, in result: Pins)`. Euer Code hat dies als `PortStatus getPins(..., Pins& result)` umgesetzt. Das ist konform und sicher. Der zusätzliche Copy-Return-Overload `Pins getPins(...)` ist eine C++-Komfortfunktion, die ihr im UML nachtragen oder im Code entfernen solltet.
+2. **`Pin::write` und `Pin::read`:** Das UML sieht für einen logischen Pin scheinbar nur "Trigger"-Aktionen (`set`, `clear`, `toggle`) vor. Wenn `read` und `write` gefordert sind, müssen sie ins UML-Modell (`image_5476b8.png`) aufgenommen werden.
 
 ---
 
-## 4. Verifikation (Verification - `test-stm32-gpio-port.cpp`)
+## 4. Compliance-Zusammenfassung (Compliance Summary)
 
-Die Unit-Tests sind extrem detailliert und nutzen einen sehr pragmatischen, ressourcenschonenden Mocking-Ansatz (C-Funktionen überschreiben) statt v-table-basiertes Mocks, was exakt zur hardwarenahen Ebene passt!
-
-### Positive Befunde
-* **Boundary Values:** Grenzfälle (z.B. `Index = pinCount`, `size = 0`, `size > pinCount`) werden hervorragend abgedeckt und führen sicher zu einem `InvalidParameter` oder einem No-Op (`[ADR-FSM-0034]`).
-* **Safety Tests:** Das Verhalten bei `nullptr` Port-Initialisierung (`Adapter_Nullptr_ReturnsNotInitialized`) ist sicher abgedeckt, was in Safety-Software obligatorisch ist.
-* **100% Coverage Target:** Es wird sogar eine spezielle `FlakyPinCountPort`-Klasse injiziert, um Branches in `rangeMask()` zu testen, die bei statischem Pin-Count unerreichbar wären. Exzellentes TDD!
-
----
-
-## 5. Compliance-Zusammenfassung (Compliance Summary)
-
-Das Pin/Port-Abstraktionskonzept ist technisch äußerst reif und nutzt moderne C++17 Features (`constexpr`, starke Typisierung, No-Heap-Dependency-Injection) vorbildlich. Die Architekturanforderungen wurden exzellent getroffen. Die nötigen Korrekturen beschränken sich rein auf Kommentarsprachen und das Hinzufügen des expliziten Löschens von Kopier-Operatoren in den Interfaces.
+Die Umsetzung des Papyrus-Modells in C++ ist technisch auf einem exzellenten Niveau. Das Problem ist nicht der Code, sondern dass die Architekturvorlage (UML) die Anforderungen der echten Hardware (Atomarität, Locking) unterschätzt hat. Deine Ergänzungen im Code sind pragmatisch und richtig, brechen aber formell das Modell.
 
 | Regel-ID | Beschreibung | Status/Begründung |
 | :--- | :--- | :--- |
-| **Papyrus Architektur** | Entkopplung von HAL | Eingehalten. `IPort` und `IPin` trennen die Hardware komplett von der Logik. |
-| **[ADR-FSM-0005]** | Englisch für Bezeichner/Kommentare | Offen. Alles ist aktuell auf Deutsch. |
-| **[ADR-FSM-0010]** | Reduktion von Includes | Eingehalten. Die zirkuläre Abhängigkeit wurde sauber durch Forward-Declarations und Inline-Implementierungen gelöst. |
-| **[ADR-FSM-0017]** | Triviale Datentypen / Fixed Width | Fast eingehalten. Im Testcode fehlt vereinzelt der `std::` Namespace. |
-| **[ADR-FSM-0024]** | `noexcept` Spezifizierer | Eingehalten. Alle Methoden werfen garantiert keine Exceptions. |
-| **[ADR-FSM-0025]** | `[[nodiscard]]` Attribut | Eingehalten. Wird bei jedem Lese- oder Status-Aufruf konsequent verwendet. |
-| **[ADR-FSM-0035]** | `struct` vs. `class` | Eingehalten. `Pin` und `Pins` kapseln ihren Status (`m_port`, `m_index`) komplett `private`. |
-| **[MISRA Rule 7.0.5]** | Keine sign/unsigned Wechsel bei Promotion | Eingehalten. Bit-Shifts (`1U << m_size`) und Casts (`static_cast<std::uint16_t>`) sind sauber vorzeichenlos formuliert. |
-| **[MISRA Rule 15.0.1]** | Unmovable Base Class | Offen (Kritisch). `IPin` und `IPort` müssen Copy/Move-Konstruktoren mit `= delete` verbieten, um in C++ sicher Slicing auszuschließen. |
+| **Papyrus Architektur** | UML vs. Code Übereinstimmung | Abweichend. Der Code enthält Methoden (`writeMasked`, `lock`), die das UML nicht spezifiziert. Eine Harmonisierung (UML Update) ist erforderlich. |
+| **[ADR-FSM-0017]** | Triviale Datentypen | Eingehalten. Das UML-Kommando ("Hier alles mit std::uint8_t...") wurde perfekt implementiert. |
+| **UML Assoziationen** | Multiplizitäten (`1`, `0..1`) | Eingehalten. `Pin` (`IPort&`) und `Pins` (`IPort*`) bilden die UML exakt ab. |
+| **UML Interface-Zwang** | "Anpassung an IPin" | Eingehalten. `Pin` implementiert `IPin` vollständig. |
