@@ -1,25 +1,24 @@
-# Code Review Report: `gbe.safety::debug::BufferedReporter` (bzw. `dev::debug`)
+# Code Review Report: `BufferedReporter.hpp` vs. Papyrus Architektur
 
 **Reviewer:** Senior Embedded Software Engineer (SIL3 / Functional Safety)
 **Datum:** 2026-03-03
-**Geprüfte Dateien:** * `lib/elements/gbe.safety/include/gobeyond/safety/debug/BufferedReporter.hpp` (Neu)
-* `BufferedReporter_alt.hpp` (Referenz / Alt)
+**Geprüfte Dateien:** * `BufferedReporter.hpp` (Neu)
+* `BufferedReporter_alt.hpp` (Alt)
 * *Architektur-Vorgabe (Papyrus PlantUML)*
 
 ---
 
 ## 1. Architektur (Design)
 
-Der `BufferedReporter` sammelt Log-Nachrichten, puffert diese asynchron in dem zuvor validierten `RingBuffer` und gibt sie zeichenweise aus. Der Vergleich zwischen der alten und neuen Code-Version zeigt, dass die neue Version (`BufferedReporter.hpp`) die Formatierungslogik deutlich vereinfacht hat, was den Speicherbedarf auf dem Stack reduziert und der Stabilität zugutekommt.
+Deine Korrekturen haben den Code bereits deutlich aufgeräumt (lokaler `buffer_type`, Entfernung von `reinterpret_cast`). Wenn wir den Code jedoch strikt gegen das von dir bereitgestellte **Papyrus UML-Diagramm** spiegeln, gibt es einen massiven architektonischen Widerspruch bezüglich deiner Design-Entscheidung (Aufteilung in ein Safety-Basis-Interface und eine Dev-Implementierung).
 
-Dennoch weisen **beide** Code-Versionen fundamentale Abweichungen zur vorgegebenen Papyrus-Architektur auf:
+### Architekturbewertung & Abgleich mit Papyrus
+* **Der Widerspruch (Vererbung vs. Komposition):** Du schreibst: *"Der Safety-BufferedReporter bleibt als reine Basisklasse und gibt nur writeCharacter(unsigned char) als Hook vor"*. 
+Das Papyrus-Diagramm sieht diese Aufteilung **nicht** vor! Laut Architektur gibt es exakt **einen** `BufferedReporter` im Paket `dev::debug`. Dieser erbt nicht und wird nicht vererbt, sondern er **besitzt** (Komposition: `*--`) eine Referenz auf das Interface `ITransmitter`.
+* **Private vs. Public / Virtual:** Im UML ist `writeCharacter` als **private** (`- writeCharacter`) definiert und nicht als `virtual ... = 0`. Der Reporter ruft intern einfach `m_transmitter.transmitByte(data)` auf. Deine aktuelle Lösung zwingt den Nutzer zur Vererbung, was das im UML geforderte "Strategy Pattern" (Austauschbarkeit des Transmitters zur Lauf- oder Initialisierungszeit) bricht.
+* **Falscher Namespace:** Die Klasse liegt in `gobeyond::safety::debug`, gehört laut Architektur aber nach `gobeyond::dev::debug`.
 
-### Architekturbewertung & Übereinstimmung mit Papyrus Architektur
-1.  **Paket/Namespace Zuordnung:** Laut Papyrus-Modell liegt `BufferedReporter` im Paket `dev::debug`. Im Code liegt die Klasse jedoch im Namespace `gobeyond::safety::debug`. Das bricht die logische Architektur, da Logging/Debugging typischerweise nicht Teil des zertifizierten `safety`-Kerns ist, sondern im `dev`-Paket gekapselt wird.
-2.  **Abhängigkeits-Injektion vs. Vererbung (`ITransmitter`):**
-    Das Papyrus UML-Diagramm definiert eine strikte Komposition: `BufferedReporter *-- ITransmitter`. Der Reporter **besitzt/referenziert** also einen `ITransmitter` (aus dem `hal::communication` Paket) als privates Member (`- transmitter: ITransmitter`). 
-    Der vorliegende Code ignoriert das Interface `ITransmitter` völlig. Stattdessen wird eine rein virtuelle Methode `virtual void writeCharacter(...) = 0;` definiert, die den Nutzer zwingt, von `BufferedReporter` zu erben. Dies verletzt das vorgegebene Design. 
-### Korrigiertes Ziel-Design (gemäß Papyrus)
+### Korrigiertes Ziel-Design (Strikt nach Papyrus)
 ```plantuml
 @startuml
 namespace gobeyond::dev::debug {
@@ -28,18 +27,15 @@ namespace gobeyond::dev::debug {
         - m_transmitter : hal::communication::ITransmitter&
         --
         + BufferedReporter(transmitter: ITransmitter&)
-        + isRelevant(...) : bool
         + report(...) : void
         + printCharacter() : bool
         - writeCharacter(data: uint8_t) : void
-        - convertMessage(...) : void
-        - storeInBuffer(...) : void
     }
 }
 note bottom of gobeyond::dev::debug::BufferedReporter
-  Must use Composition for ITransmitter 
-  instead of pure virtual inheritance!
-  Must be moved to namespace dev::debug.
+  Strikte Komposition nach Papyrus:
+  Keine pure virtual Methoden! 
+  Der ITransmitter wird per Dependency Injection übergeben.
 end note
 @enduml
 ```
@@ -48,57 +44,71 @@ end note
 
 ## 2. Befunde & Verstöße (Findings & Violations)
 
-Neben den Architektur-Abweichungen gibt es signifikante Konflikte mit den MISRA-Sicherheitsregeln für C-Bibliotheken:
+Trotz deiner Verbesserungen gibt es noch kritische Konflikte mit der `Sprachuntermenge.txt` und MISRA:
 
 | ID | Datei | Ort / Zeile | Regel | Beschreibung des Verstoßes | Severity |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **V-01** | `BufferedReporter.hpp` | Global | Papyrus Architektur | **Architektur-Verstoß:** Falscher Namespace (`safety::debug` statt `dev::debug`) und fehlende Komposition des `ITransmitter` Interfaces. | High |
-| **V-02** | `BufferedReporter.hpp` | Zeile 3, 4 | `[ADR-FSM-0007]` | Der Include-Guard Name lautet `GOBEYOND_SAFETY_...` statt dem in ADR-FSM-0007 geforderten Format `<PROJECT>_<PATH>_<FILE>_HPP` (z.B. `GBE_DEV_DEBUG_BUFFERED_REPORTER_HPP`). | Low |
-| **V-03** | `BufferedReporter.hpp` | Zeile 75 | Rule 30.0.1 | Verwendung von `std::snprintf` aus `<cstdio>`. Die C Library Input/Output Funktionen sind in SIL3/MISRA strikt verboten. | High (Safety) |
-| **V-04** | `BufferedReporter.hpp` | Zeile 114 | Rule 24.5.2 | Verwendung von `std::memcpy` und `std::strlen` aus `<cstring>`. Die String-Handling-Funktionen der C-Bibliothek dürfen nicht genutzt werden. | High |
-| **V-05** | `BufferedReporter.hpp` | Zeile 93 | `[ADR-FSM-0025]` | Die Methode `printCharacter()` gibt einen `bool` zurück, der für den Aufrufer hochrelevant ist (um zu wissen, ob der Puffer leer ist). Das Attribut `[[nodiscard]]` fehlt. | Medium |
-| **V-06** | `BufferedReporter.hpp` | Doxygen | `[ADR-FSM-0036]` | Es fehlen `@pre` (Vorbedingungen) und `@post` (Nachbedingungen) in der Doxygen-Dokumentation der einzelnen Methoden. | Low |
+| **V-01** | `BufferedReporter.hpp` | Global | Papyrus Architektur | **Architektur-Verstoß:** Die Umsetzung als abstrakte Basisklasse mit `virtual writeCharacter = 0` und dem Namespace `safety::debug` widerspricht dem Papyrus-Modell (Komposition in `dev::debug`). | High |
+| **V-02** | `BufferedReporter.hpp` | Zeile 3 | `[ADR-FSM-0007]` | Der Include-Guard lautet `GOBEYOND_SAFETY_...` statt `<PROJECT>_<PATH>_<FILE>_HPP` (z.B. `GBE_DEV_DEBUG_BUFFERED_REPORTER_HPP`). | Low |
+| **V-03** | `BufferedReporter.hpp` | Zeile 75 | Rule 30.0.1 | **Kritisch:** Verwendung von `std::snprintf` aus `<cstdio>`. Die C Library Input/Output Funktionen sind in SIL3/MISRA strengstens verboten. | High |
+| **V-04** | `BufferedReporter.hpp` | Zeile 114 | Rule 24.5.2 | **Kritisch:** Verwendung von `std::memcpy` und `std::strlen` aus `<cstring>`. Die String-Handling-Funktionen der C-Bibliothek dürfen nicht genutzt werden. | High |
+| **V-05** | `BufferedReporter.hpp` | Zeile 108 | `[ADR-FSM-0017]` | Parameter `unsigned char c`. Die Basis-Datentypen sind verboten. Es muss ein Fixed Width Integer `std::uint8_t` verwendet werden (wie auch im UML-Diagramm spezifiziert!). | High |
+| **V-06** | `BufferedReporter.hpp` | Zeile 93 | `[ADR-FSM-0025]` | Die Methode `printCharacter()` gibt einen `bool` zurück, der den Aufrufer informiert, ob Daten verarbeitet wurden. Das Attribut `[[nodiscard]]` fehlt. | Medium |
+| **V-07** | `BufferedReporter.hpp` | Doxygen | `[ADR-FSM-0036]` | Es fehlen `@pre` (Vorbedingungen) und `@post` (Nachbedingungen) in den Doxygen-Kommentaren. | Low |
 
 ---
 
-## 3. Verbesserungsvorschläge (Suggestions)
+## 3. Analyse: Dein Feedback & das des Kollegen
 
-Um den Code an die Papyrus-Architektur anzupassen und SIL3-konform zu machen, sind folgende Refactorings notwendig:
+Du hast mit dem Kollegen-Review bereits einige gute Punkte adressiert. Hier meine SIL3-Experten-Einschätzung dazu:
 
-1. **Namespace & Ordnerstruktur anpassen:**
-   Verschiebe die Datei physikalisch nach `lib/elements/gbe.dev/include/gobeyond/dev/debug/` und ändere den Namespace auf `namespace gobeyond::dev::debug`. Passe den Include Guard entsprechend an (`#ifndef GBE_DEV_DEBUG_BUFFERED_REPORTER_HPP`).
-2. **Architektur-Korrektur (Abhängigkeitsinjektion statt Vererbung):**
-   Entferne die pure virtuelle Methode `virtual void writeCharacter(...)`. Übergib stattdessen eine Referenz auf `ITransmitter` im Konstruktor des `BufferedReporter` und speichere sie als Member (z.B. `hal::communication::ITransmitter& m_transmitter;`). `printCharacter()` ruft dann `m_transmitter.transmitByte(c)` auf. Dies entspricht exakt der UML-Vorgabe.
-3. **MISRA C-Library Ersatz (Rules 24.5.2 & 30.0.1):**
-   * **`std::memcpy`:** Ersetzen durch `std::copy_n` aus `<algorithm>` oder Schleifen.
-   * **`std::strlen`:** Ersetzen durch die Längen-Information aus `std::string_view` oder durch manuelles Zählen (C++ basierend).
-   * **`std::snprintf`:** Hierfür muss zwingend ein **Deviation Request (Abweichungsantrag)** verfasst werden, falls es aus Performance-/Codegrößen-Gründen unumgänglich ist, da MISRA Rule 30.0.1 `<cstdio>` verbietet. Alternativ muss auf moderne, sichere C++-Formatierung (wie `std::to_chars` für Zahlen) ausgewichen werden.
-4. **`[[nodiscard]]` ergänzen:** Füge `[[nodiscard]]` zur Signatur von `printCharacter()` hinzu.
+1. **Globaler RingBuffer-Typ:** Deine Lösung (Alias als Member `buffer_type`) ist perfekt und MISRA-konform.
+2. **isRelevant / Filterlogik:** Wenn du `isRelevant` pure virtual machst, zwingst du zur Vererbung. Wenn Papyrus das nicht vorsieht, sollte die Filterlogik entweder über Configuration (z.B. ein Log-Level-Threshold als Member-Variable) oder über ein übergebenes Policy-Objekt abgewickelt werden.
+3. **Transmitter-Anbindung:** Der Kollege hatte zu 100% recht: *"Wieso ist die Funktion pure virtual? Der BufferedReporter sollte eine Referenz auf einen ITransmitter ... enthalten und auf diesem transmitByte() aufrufen."* Deine Aufteilung in "Safety-Base" und "Dev-Derived" weicht von der vorgegebenen Architektur ab. Die saubere Lösung ist **Dependency Injection** im Konstruktor.
+4. **Umgehung von `[[nodiscard]]` mit `[[maybe_unused]]`:** Der Kollege merkte an, dass dies unzulässig sei. Du hast es mit `[[maybe_unused]] const auto result = ...;` gelöst. Syntaktisch ist das in C++17 korrekt, um das Warning abzustellen. **Safety-technisch** ist das bewusste Ignorieren eines fehlgeschlagenen Puffer-Writes (Buffer Overflow) nur dann akzeptabel, wenn die `OverflowStrategy` des `RingBuffers` (z.B. `OverwriteOldest`) dieses Verhalten als "Safe" definiert. Dies muss zwingend im `@safety`-Tag der Methode dokumentiert werden.
+5. **C-Style & Casts:** Gut, dass `reinterpret_cast` weg ist. Aber die C-Bibliotheken (`snprintf`, `strlen`, `memcpy`) bleiben ein massiver MISRA-Verstoß.
 
 ---
 
-## 4. Verifikation (Verification - Missing Unit Tests)
+## 4. Verbesserungsvorschläge (Suggestions)
 
-Aktuell liegen keine Unit Tests für den `BufferedReporter` vor. Zur Erfüllung der Vorgaben `[ADR-FSM-0034]` und `[ADR-FSM-0038]` müssen diese per TDD erstellt werden.
+Um Architektur und MISRA in Einklang zu bringen, schlage ich folgenden Umbau vor:
 
-### Zwingend zu erstellende Test-Szenarien:
-* **Mocking:** Das `ITransmitter`-Interface (nach Umbau auf Komposition) muss in GTest über GoogleMock (`MockTransmitter`) gemockt werden. So kann verifiziert werden, dass `printCharacter()` exakt die gepufferten Bytes an die HAL schickt.
-* **Puffer-Überlauf (Boundary Values):** Testen, was passiert, wenn `report()` mehr Daten in den `RingBuffer` schreibt, als dieser fassen kann. Verhält er sich konform zur im `RingBuffer` definierten `OverflowStrategy`?
-* **Formatierungs-Test:** Verifizieren, dass der aus dem `RingBuffer` gelesene String exakt das Format `[Zeit] - [Level]: [Message]\r\n` aufweist und nicht über die `MAX_TEMP_BUFFER`-Grenze hinausschießt.
+1. **Namespace & Ordner:** Ändere den Namespace auf `gobeyond::dev::debug` und passe den Include-Guard an.
+2. **Architektur reparieren (Komposition):**
+   ```cpp
+   // Im Konstruktor:
+   explicit BufferedReporter(hal::communication::ITransmitter& transmitter) noexcept 
+       : m_transmitter(transmitter) {}
+   
+   // In printCharacter():
+   bool printCharacter() {
+       std::uint8_t c; // ADR-FSM-0017
+       if (m_buffer.get(c)) {
+           (void)m_transmitter.transmitByte(c); // Aufruf des Interfaces!
+           return true;
+       }
+       return false;
+   }
+   ```
+3. **Datentypen korrigieren:** Ersetze alle `unsigned char` durch `std::uint8_t` (gemäß `[ADR-FSM-0017]` und Papyrus-UML).
+4. **MISRA C-Library (Die schwere Entscheidung):**
+   Für `std::memcpy` -> nutze `std::copy_n`.
+   Für `std::strlen` -> nutze die `.length()` Eigenschaft von `std::string_view` oder schreibe eine eigene kleine `constexpr` Helferfunktion.
+   Für `std::snprintf` -> **Du musst hier eine Entscheidung treffen.** In SIL3 darfst du es nicht verwenden. Die saubere C++17 Lösung wäre `std::to_chars` für die Konvertierung der Zahlen (Timestamp, Level) plus manuelles Zusammensetzen des Strings. Wenn das zu aufwändig ist, musst du im Projekt einen offiziellen **Deviation Request** für MISRA Rule 30.0.1 schreiben und dokumentieren, warum `snprintf` hier sicher ist (z.B. weil Puffergrößen durch Konstanten limitiert sind).
 
 ---
 
 ## 5. Compliance-Zusammenfassung (Compliance Summary)
 
-Die neue Version (`BufferedReporter.hpp`) ist schlanker als `BufferedReporter_alt.hpp`, da sie komplexe dynamische Argumente aus dem `snprintf` entfernt hat. Der wichtigste nächste Schritt ist jedoch die **Synchronisation mit der Papyrus-Architektur** (Komposition statt Vererbung) sowie das Entfernen der C-Standardbibliotheken.
+Die Klasse verfehlt aktuell die Papyrus-Vorgaben bezüglich Kapselung/Vererbung und bricht die MISRA-Regeln für C-Standardbibliotheken. 
 
 | Regel-ID | Beschreibung | Status/Begründung |
 | :--- | :--- | :--- |
-| **Papyrus Architektur** | Modul-Zugehörigkeit & Komposition | Offen (Kritisch). Falscher Namespace (`safety` statt `dev`) und fehlende Nutzung des `ITransmitter` Interfaces via Dependency Injection. |
-| **[ADR-FSM-0005]** | Englisch für Bezeichner/Kommentare | Eingehalten. Kommentare und Code sind in Englisch. |
-| **[ADR-FSM-0006/0007]** | Include Guards + `#pragma once` | Offen. Format des Include Guards entspricht nicht der Namenskonvention. |
-| **[ADR-FSM-0024]** | `noexcept` Spezifizierer | Eingehalten. `report` und interne Helfer sind sauber als `noexcept` markiert. |
+| **Papyrus Architektur** | Modul-Zugehörigkeit & Komposition | Offen (Kritisch). Falscher Namespace und fehlende Nutzung des `ITransmitter` Interfaces per Dependency Injection. |
+| **[ADR-FSM-0005]** | Englisch für Bezeichner/Kommentare | Eingehalten. |
+| **[ADR-FSM-0017]** | Fixed Width Integers | Offen. `unsigned char` muss zwingend zu `std::uint8_t` werden. |
+| **[ADR-FSM-0024]** | `noexcept` Spezifizierer | Eingehalten. |
 | **[ADR-FSM-0025]** | `[[nodiscard]]` Attribut | Offen. Fehlt bei `printCharacter()`. |
-| **[ADR-FSM-0036]** | Doxygen Dokumentation | Offen. `@pre` und `@post` Tags fehlen in der Methodenbeschreibung. |
 | **[MISRA Rule 24.5.2]** | Verbot von `<cstring>` | Offen (Kritisch). Nutzung von `memcpy` und `strlen` ist verboten. |
-| **[MISRA Rule 30.0.1]** | Verbot von `<cstdio>` | Offen (Kritisch). Die Nutzung von `std::snprintf` ist verboten. Hier ist entweder ein Refactoring oder ein formaler Deviation-Request notwendig. |
+| **[MISRA Rule 30.0.1]** | Verbot von `<cstdio>` | Offen (Kritisch). Die Nutzung von `std::snprintf` ist verboten. Refactoring oder Deviation-Request nötig. |
