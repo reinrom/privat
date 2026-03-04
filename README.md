@@ -1,159 +1,83 @@
-# Code Review Report: `gbe.hal::communication`
+# Code Review Report: `gbe.bsp::stm32h753` (Communication Adapters)
 
 **Reviewer:** Senior Embedded Software Engineer (SIL3 / Functional Safety)
 **Datum:** 2026-03-04
-**Geprüfte Dateien:** * `ireceiver.hpp`, `itransmitter.hpp` (Asynchrone IPC-Interfaces)
-* `itransceiver.hpp`, `iuart.hpp` (Synchron/Allgemeine Interfaces)
-* `status.hpp`, `parity.hpp`, `transceiver-mode.hpp` (Typen)
-* `span.hpp` (Utility)
-* `i_concurrent_transceiver.hpp` (Legacy)
-* *Architektur-Vorgaben (Papyrus PlantUMLs)*
+**Geprüfte Dateien:** * `stm32_uart_dma.hpp` (Asynchroner IPC-Adapter)
+* `stm32-uart.hpp` (Synchroner Konfigurations-Adapter)
+* `tests/test-stm32-uart-dma.cpp`, `test-stm32-uart.cpp`, `test-uart.cpp`, `test-zm-tester-platform.cpp`
 
 ---
 
-## 1. Architektur (Design) & Abgleich mit Papyrus
+## 1. Architektur (Design)
 
-Das Päckchen `communication` ist das Herzstück der Hardware-Abstraktion (HAL). Der Code spiegelt eine bemerkenswerte Evolution wider: Weg von monolithischen Legacy-Interfaces (`IConcurrentTransmitter`) hin zu feingranularen, sauberen Schnittstellen (`ITransmitter`, `IReceiver`).
+Diese Ebene verbindet die abstrakten Verträge (Interfaces) mit der harten STM32-Realität. Die Umsetzung der Papyrus-Architektur in C++ ist hier besonders gut gelungen.
 
 ### Architekturbewertung
-* **Interface Segregation Principle (ISP):** Exzellent umgesetzt! Dass die Methode `transceive()` (gleichzeitiges Senden/Empfangen, typisch für SPI) bewusst aus `ITransceiver` weggelassen wurde, verhindert, dass asynchrone Schnittstellen wie UART Dummy-Implementierungen schreiben müssen.
-* **Trennung von synchron/asynchron:** Das Papyrus-Modell trennt sauber zwischen den asynchronen Rollen (`ITransmitter` / `IReceiver` mit `isFullySent`) und dem blockierenden/allgemeinen `ITransceiver`. Der Code bildet das 1:1 ab.
-* **Eigener `span`:** Da ihr C++17 nutzt (wo `std::span` erst ab C++20 verfügbar ist), ist der Eigenbau eines non-owning `span` architektonisch die exakt richtige Entscheidung für Pufferübergaben ohne Kopier-Overhead.
-
-### UML-Klassendiagramm (Zusammenfassung der Ist-Architektur)
-```plantuml
-@startuml
-namespace gobeyond::hal::communication {
-    interface ITransmitter <<interface>> {
-        + {abstract} transmit(data: span<const uint8_t>) : Status
-        + {abstract} getRemainingBytesToSend() : size_t
-        + {abstract} isFullySent() : bool
-    }
-
-    interface IReceiver <<interface>> {
-        + {abstract} startReceiving(data: span<uint8_t>) : Status
-        + {abstract} getRemainingBytesToReceive() : size_t
-        + {abstract} isFullyReceived() : bool
-    }
-
-    interface ITransceiver <<interface>> {
-        + {abstract} transmitByte(data: uint8_t) : Status
-        + {abstract} receiveByte() : uint8_t
-        + {abstract} transmit(data: span<const uint8_t>) : Status
-        + {abstract} receive(buffer: span<uint8_t>) : Status
-        + {abstract} pause() : void
-        + {abstract} resume() : void
-        + {abstract} abort() : void
-    }
-
-    struct Configuration {
-        + baudrate : uint32_t
-        + wordLength : uint8_t
-        + oversampling : uint8_t
-        + mode : ETransceiverMode
-        + parity : Parity
-    }
-
-    interface IUart <<interface>> {
-        + {abstract} configure(config: Configuration) : Status
-    }
-
-    ITransceiver <|-- IUart
-    IUart ..> Configuration : uses
-}
-@enduml
-```
+* **IPK Querkommunikation (`Stm32UartDma`):** Die Klasse implementiert exakt das UML-Modell (`UartWithDMA`). Sie trennt geschickt Sende- und Empfangspfade intern über zwei separate Status-Flags (`m_sending`, `m_receiving`) und kapselt die HAL-Interrupt-Callbacks (`onTxComplete`, `onRxComplete`).
+* **SIL3 Cache-Coherency:** Der Cortex-M7 (STM32H7) hat einen L1-Daten-Cache. Wenn DMA genutzt wird, entsteht Dateninkonsistenz. Der Entwickler hat hier hervorragend mitgedacht und `SCB_CleanDCache_by_Addr` (vor dem Senden) sowie `SCB_InvalidateDCache_by_Addr` (nach dem Empfangen) eingebaut. Dies ist sicherheitskritisch und exzellent gelöst!
+* **Legacy vs. Modern:** `Stm32UartDma` implementiert aktuell noch vier Interfaces (die alten `IConcurrent*` und die neuen UML-Interfaces). Das ist als Übergangslösung (Adapter-Pattern) völlig legitim.
 
 ---
 
 ## 2. Befunde & Verstöße (Findings & Violations)
 
-Das Design ist massiv, aber der Teufel steckt im Detail. Es gibt einige kritische Verstöße gegen die MISRA "Rule of Five" bei den virtuellen Klassen und einen architektonischen Logikfehler bei den Datentypen der `Configuration`.
+Trotz des starken Designs zwingt die ST-Microelectronics HAL uns hier zu einigen unsauberen C++-Konstrukten, die wir bezüglich MISRA formal absichern müssen.
 
 | ID | Datei | Ort / Zeile | Regel | Beschreibung des Verstoßes | Severity |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **V-01** | `Alle *.hpp` | Global | `[ADR-FSM-0005]` | Alle Doxygen- und Inline-Kommentare sind auf Deutsch. Die Sprachuntermenge fordert zwingend Englisch. | Medium |
-| **V-02** | `iuart.hpp` | Zeile 42, 43 | `[ADR-FSM-0017]` | `baudrate` und `wordLength` sind als `std::size_t` deklariert. Die ADR besagt zwingend: "Der Datentyp `std::size_t` wird für Variablen verwendet, die die Größe eines Objektes beschreiben". Eine Baudrate ist *keine* Objektgröße. Hier muss ein Fixed-Width Integer verwendet werden. | High |
-| **V-03** | `i*.hpp` | Klassendefinitionen | Rule 15.0.1 | Die Interfaces (`IReceiver`, `ITransmitter`, `ITransceiver`, `IUart`) besitzen einen virtuellen Destruktor, verbieten aber nicht explizit Copy- und Move-Semantik (`= delete`). Das ist für polymorphe Basisklassen ein Safety-Risiko (Objekt-Slicing). | High (Safety) |
-| **V-04** | `span.hpp` | Implementierung | Architektur / C++ | Die `span`-Implementierung ist zu stark vereinfacht. Es fehlen die Iterator-Methoden (`begin()`, `end()`), was bedeutet, dass der `span` nicht in C++ Range-Based-For-Loops verwendet werden kann (welche durch Rule 9.5.1 empfohlen werden). | Medium |
-| **V-05** | `Alle *.hpp` | Doxygen | `[ADR-FSM-0036]` | Bei nahezu allen virtuellen Methoden fehlen die zwingend geforderten `@pre`, `@post` und `@safety` Tags in der Doxygen-Dokumentation. | Low |
+| **V-01** | `stm32-uart.hpp`, `stm32_uart_dma.hpp` | div. | Rule 8.2.3 | **Kritisch:** Die HAL-Funktionen (`HAL_UART_Transmit`) erwarten `uint8_t*`, obwohl wir logisch einen `const uint8_t*` übergeben (Puffer wird nur gelesen). Der Entwickler hat dies mit `const_cast` gelöst. MISRA verbietet `const_cast`. Hierfür ist ein formaler Deviation Request (Abweichungsantrag) zwingend erforderlich, der wie im Code als Kommentar bereits vorbereitet, begründet werden muss. | High |
+| **V-02** | `stm32_uart_dma.hpp` | Zeile 353, 354 | Safety / Concurrency | Die Variablen `m_sending` und `m_receiving` sind als `volatile bool` deklariert. In modernem C++ (seit C++11) ist `volatile` **kein** Mechanismus für Thread-Sicherheit oder ISR-Synchronisation. Dies kann zu Undefined Behavior führen. | Medium |
+| **V-03** | `stm32-uart.hpp` | Zeile 162 | Safety / Logik | Die Methode `receiveByte()` gibt `0U` zurück, wenn der Handle ein `nullptr` ist oder ein Timeout auftritt. Das ist extrem gefährlich, da `0x00` ein gültiges Datenbyte sein kann. | High |
+| **V-04** | `Alle Test-Dateien` | Global | `[ADR-FSM-0017]` | In den Tests wird `uint8_t` oder `uint16_t` verwendet. Gemäß Sprachuntermenge muss es zwingend `std::uint8_t` heißen. | Low |
+| **V-05** | `Alle *.hpp Dateien`| Doxygen | `[ADR-FSM-0005]` | Kommentare sind weiterhin auf Deutsch. | Medium |
 
 ---
 
 ## 3. Verbesserungsvorschläge (Suggestions)
 
-Hier sind die konkreten Handlungsschritte, um die Interfaces auf 100% SIL3- und C++17-Niveau zu bringen:
+Um die letzten Risiken in der Hardware-Anbindung abzustellen, schlage ich Folgendes vor:
 
-### 1. Datentypen in `iuart.hpp` korrigieren (V-02)
-Ändere die Struktur `Configuration` so, dass fachlich korrekte Datentypen genutzt werden:
-```cpp
-struct Configuration {
-    std::uint32_t baudrate = 9600U;        // uint32_t ist perfekt für bis zu 4 MBit/s
-    std::uint8_t wordLength = 8U;          // uint8_t reicht für 8 oder 9 Bit
-    std::uint8_t oversampling = 16U;
-    ETransceiverMode mode = ETransceiverMode::Transceiver;
-    Parity parity = Parity::None;
-    // ... Konstruktoren entsprechend anpassen ...
-};
-```
-
-### 2. Polymorphe Basisklassen abdichten (V-03)
-Füge in **jedem** Interface (`ITransmitter`, `IReceiver`, `ITransceiver`, `IUart`) direkt nach dem virtuellen Destruktor Folgendes ein:
-```cpp
-virtual ~IReceiver() = default;
-
-// Rule of Five: Make base class unmovable (MISRA Rule 15.0.1)
-IReceiver(const IReceiver&) = delete;
-IReceiver& operator=(const IReceiver&) = delete;
-IReceiver(IReceiver&&) = delete;
-IReceiver& operator=(IReceiver&&) = delete;
-```
-
-### 3. Den C++17 `span` nutzbar machen (V-04)
-Auf deine explizite Bitte hin, den `span.hpp` zu prüfen: Um ihn C++-idiomatisch nutzbar zu machen, musst du lediglich Pointer-Rückgaben für Iteratoren ergänzen. Füge in `class span` ein:
-```cpp
-[[nodiscard]] constexpr T* begin() const noexcept { return m_data; }
-[[nodiscard]] constexpr T* end() const noexcept { return m_data + m_size; }
-```
-Damit kann die Applikation später Konstrukte wie `for(auto byte : rxSpan)` nutzen!
-
-### 4. Englisch & Doxygen (V-01, V-05)
-Übersetze die Kommentare und ergänze die Safety-Garantien.
-*Beispiel für `startReceiving`:*
-* `@pre Hardware must be configured and not currently receiving.`
-* `@post DMA transfer is initialized in the background.`
-* `@safety Non-blocking call, O(1) execution time.`
+1. **ISR-Synchronisation (V-02 beheben):**
+   Ersetze `volatile bool` durch `std::atomic<bool>`. Dies garantiert auf C++-Ebene atomare Zugriffe ohne Memory-Reordering durch den Compiler.
+   ```cpp
+   #include <atomic>
+   // ...
+   std::atomic<bool> m_sending{false};
+   std::atomic<bool> m_receiving{false};
+   ```
+2. **Sicheres `receiveByte` (V-03 beheben):**
+   Da das Interface `ITransceiver` einen fixen Return-Value vorgibt, gibt es keine Fehler-Rückgabe. Da dieses Interface synchron blockiert, sollte die Methode aus dem Interface idealerweise in `[[nodiscard]] virtual std::optional<std::uint8_t> receiveByte() = 0;` geändert werden. Falls das Interface nicht geändert werden darf, MUSS der Aufrufer den Status des UARTs vorab abfragen können (was aktuell nicht implementiert ist).
+3. **MISRA Deviation für `const_cast` (V-01):**
+   Erstellt ein offizielles Dokument im Projekt: "Deviation von MISRA 8.2.3: ST HAL APIs für Transmit-Funktionen sind historisch bedingt nicht const-correct. Da die Hardware-Register in diesem Modus nur Lesezugriffe auf den RAM ausführen, ist der `const_cast` an dieser Grenze sicherheitstechnisch unbedenklich."
+4. **Namespace in Tests (V-04 beheben):**
+   Führe ein Suchen & Ersetzen in den Test-Dateien durch: `uint8_t` -> `std::uint8_t`.
 
 ---
 
-## 4. Verifikation (Missing Unit Tests)
+## 4. Verifikation (Test Coverage)
 
-Da dies reine Interfaces sind, gibt es keinen direkten Ausführungscode zu testen. Gemäß `[ADR-FSM-0034]` (TDD) müssen für das `communication`-Päckchen jedoch **GoogleMock (gmock) Klassen** generiert werden.
+Die Unit-Tests sind ein absolutes Highlight dieses Päckchens. Der Entwickler hat C-Funktionen der HAL (z.B. `HAL_UART_Transmit`) in den Tests überschrieben (gemockt), um den Zustand des Adapters zu spyen. 
 
-**To-Do für die Tests:**
-Erstelle einen Header `mock_communication.hpp` im Test-Ordner:
-```cpp
-class MockTransmitter : public gobeyond::hal::communication::ITransmitter {
-public:
-    MOCK_METHOD(Status, transmit, (span<const std::uint8_t>), (noexcept, override));
-    MOCK_METHOD(std::size_t, getRemainingBytesToSend, (), (const, noexcept, override));
-    MOCK_METHOD(bool, isFullySent, (), (const, noexcept, override));
-};
-```
-Diese Mocks sind zwingend erforderlich, um später die Applikationsebene (wie den `BufferedReporter`) gegen diese Hardware-Verträge testen zu können.
+### Positive Befunde
+* **Contract-Testing:** `test-zm-tester-platform.cpp` verifiziert erfolgreich, dass das Architektur-Konzept der Rollenverteilung (`ITransmitter` und `IReceiver` zeigen auf dieselbe Instanz) funktioniert.
+* **Vollständige Pfad-Abdeckung:** `test-stm32-uart-dma.cpp` deckt gezielt Fehlerfälle (z.B. Nullpointer-Übergaben, leere Puffer) ab.
+* **Robustheit:** Die Tests verifizieren, dass Aufrufe von `startSending` bei bereits laufendem DMA korrekt mit `AsyncStatus::Busy` abgewiesen werden (`[ADR-FSM-0034]`).
+
+### Lücken & Vorschläge für die Tests
+* Der Test-Coverage Report im Code markiert, dass der Zweig für den DMA-Counter in `getRemainingBytesToSend()` schwer testbar ist. Eine Möglichkeit wäre, die Dummy-C-Funktion `__HAL_DMA_GET_COUNTER` in der Test-Umgebung so umzuschreiben, dass sie einen globalen Mock-Wert zurückgibt, den der Test vorher setzt.
 
 ---
 
 ## 5. Compliance-Zusammenfassung (Compliance Summary)
 
-Die Kommunikations-Architektur ist sehr robust. Sie trennt sauber zwischen zustandsbehafteten synchronen Transfers und non-blocking DMA-Zugriffen. Mit der Behebung der MISRA `Rule of Five` für Interfaces und der Datentyp-Korrektur in der Konfiguration ist dieses Päckchen bereit für die Hardware-Implementierung.
+Die Hardware-Adapter sind hochprofessionell geschrieben. Die Cache-Verwaltung für den DMA zeigt tiefes Verständnis der Cortex-M7 Architektur. Mit dem Umstieg auf `std::atomic` und der Dokumentation der `const_cast` Deviation ist der Code uneingeschränkt SIL3-tauglich.
 
 | Regel-ID | Beschreibung | Status/Begründung |
 | :--- | :--- | :--- |
-| **Papyrus Architektur** | UML Abdeckung | Exzellent. Die Trennung in `IReceiver`/`ITransmitter` und `ITransceiver` ist 1:1 umgesetzt. |
-| **[ADR-FSM-0005]** | Englisch für Bezeichner/Kommentare | Offen. Alles ist aktuell auf Deutsch. |
-| **[ADR-FSM-0017]** | Fixed Width Integers | Offen. `baudrate` und `wordLength` verstoßen durch Nutzung von `size_t` gegen die Definition. |
-| **[ADR-FSM-0035]** | `struct` vs. `class` | Eingehalten. `Configuration` ist ein sauberes POD-Struct. Interfaces sind Klassen. |
-| **[ADR-FSM-0036]** | Doxygen Dokumentation | Offen. `@pre`, `@post` und `@safety` müssen ergänzt werden. |
-| **[MISRA Rule 11.6.1]** | Struct Initialisierung | Eingehalten. `Configuration` initialisiert alle Member. |
-| **[MISRA Rule 15.0.1]** | Unmovable Base Class | Offen (Kritisch). In allen Interfaces müssen Copy/Move-Konstruktoren mit `= delete` verboten werden. |
+| **Papyrus Architektur** | UML Abdeckung | Exzellent. Die `ZmTesterPlatform` verknüpft die Instanzen exakt nach Vorgabe. |
+| **[ADR-FSM-0005]** | Englisch für Bezeichner/Kommentare | Offen. Doxygen ist aktuell auf Deutsch. |
+| **[ADR-FSM-0017]** | Triviale Datentypen / Fixed Width | Fast eingehalten. In den Tests fehlt vereinzelt der `std::` Namespace. |
+| **[ADR-FSM-0022]** | Early Exit | Eingehalten. Nullpointer und leere Arrays werden sofort abgewiesen. |
+| **[ADR-FSM-0024]** | `noexcept` Spezifizierer | Eingehalten. Alle kritischen HAL-Methoden sind konsequent `noexcept`. |
+| **[MISRA Rule 8.2.3]** | Entfernen von `const` Qualifizierern | Abweichung (Deviation) zwingend nötig. Die ST-HAL-API erfordert einen `const_cast`. |
+| **Safety / Concurrency** | Race Conditions | Offen (Kritisch). `volatile bool` für ISR-Status-Flags muss durch `std::atomic<bool>` ersetzt werden. |
