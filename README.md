@@ -1,83 +1,53 @@
-# Code Review Report: `gbe.bsp::stm32h753` (Communication Adapters)
+# Branch: feature/basic_labormuster
 
-**Reviewer:** Senior Embedded Software Engineer (SIL3 / Functional Safety)
-**Datum:** 2026-03-04
-**Geprüfte Dateien:** * `stm32_uart_dma.hpp` (Asynchroner IPC-Adapter)
-* `stm32-uart.hpp` (Synchroner Konfigurations-Adapter)
-* `tests/test-stm32-uart-dma.cpp`, `test-stm32-uart.cpp`, `test-uart.cpp`, `test-zm-tester-platform.cpp`
+## Management Summary
 
----
+Dieser Branch dokumentiert die erfolgreiche architektonische Zusammenführung der hardwarenahen Initialisierung (ursprüngliche CubeMX-Firmware) mit der modularen, SIL3-orientierten C++17-Architektur (LaborMuster). 
 
-## 1. Architektur (Design)
-
-Diese Ebene verbindet die abstrakten Verträge (Interfaces) mit der harten STM32-Realität. Die Umsetzung der Papyrus-Architektur in C++ ist hier besonders gut gelungen.
-
-### Architekturbewertung
-* **IPK Querkommunikation (`Stm32UartDma`):** Die Klasse implementiert exakt das UML-Modell (`UartWithDMA`). Sie trennt geschickt Sende- und Empfangspfade intern über zwei separate Status-Flags (`m_sending`, `m_receiving`) und kapselt die HAL-Interrupt-Callbacks (`onTxComplete`, `onRxComplete`).
-* **SIL3 Cache-Coherency:** Der Cortex-M7 (STM32H7) hat einen L1-Daten-Cache. Wenn DMA genutzt wird, entsteht Dateninkonsistenz. Der Entwickler hat hier hervorragend mitgedacht und `SCB_CleanDCache_by_Addr` (vor dem Senden) sowie `SCB_InvalidateDCache_by_Addr` (nach dem Empfangen) eingebaut. Dies ist sicherheitskritisch und exzellent gelöst!
-* **Legacy vs. Modern:** `Stm32UartDma` implementiert aktuell noch vier Interfaces (die alten `IConcurrent*` und die neuen UML-Interfaces). Das ist als Übergangslösung (Adapter-Pattern) völlig legitim.
+Ziel dieser Integration ("Variante 3") war es, die exakten physikalischen Hardware-Gegebenheiten der Master- und Slave-Platinen beizubehalten, diese jedoch in eine vollständig entkoppelte, testbare und schnittstellenbasierte C++-Struktur zu überführen. Das Ergebnis ist ein lauffähiges System, das eine asynchrone Inter-Prozessor-Kommunikation (IPK) via DMA und ein non-blocking Logging-System über Ringpuffer auf zwei STM32H7-Controllern demonstriert.
 
 ---
 
-## 2. Befunde & Verstöße (Findings & Violations)
+## Architektonische Meilensteine
 
-Trotz des starken Designs zwingt die ST-Microelectronics HAL uns hier zu einigen unsauberen C++-Konstrukten, die wir bezüglich MISRA formal absichern müssen.
+### 1. Entkopplung von Hardware-Initialisierung und Applikationslogik
+Die direkte Abhängigkeit der Applikation von STM32-HAL-Handlen wurde aufgelöst. 
+* Die von STM32CubeMX generierten Initialisierungsfunktionen (inkl. Pin-Routings und MSP-Konfigurationen) wurden strikt in dedizierte Dateien ausgelagert (`board.master.cpp` und `board.slave.cpp`).
+* Die zentrale `stm32h7xx_hal_msp.c` wurde aufgelöst, da Master und Slave unterschiedliche Pin-Belegungen für dieselben logischen Schnittstellen (z.B. SPI, UART) nutzen. Die MSP-Initialisierung erfolgt nun zielspezifisch in den jeweiligen Board-Dateien.
 
-| ID | Datei | Ort / Zeile | Regel | Beschreibung des Verstoßes | Severity |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **V-01** | `stm32-uart.hpp`, `stm32_uart_dma.hpp` | div. | Rule 8.2.3 | **Kritisch:** Die HAL-Funktionen (`HAL_UART_Transmit`) erwarten `uint8_t*`, obwohl wir logisch einen `const uint8_t*` übergeben (Puffer wird nur gelesen). Der Entwickler hat dies mit `const_cast` gelöst. MISRA verbietet `const_cast`. Hierfür ist ein formaler Deviation Request (Abweichungsantrag) zwingend erforderlich, der wie im Code als Kommentar bereits vorbereitet, begründet werden muss. | High |
-| **V-02** | `stm32_uart_dma.hpp` | Zeile 353, 354 | Safety / Concurrency | Die Variablen `m_sending` und `m_receiving` sind als `volatile bool` deklariert. In modernem C++ (seit C++11) ist `volatile` **kein** Mechanismus für Thread-Sicherheit oder ISR-Synchronisation. Dies kann zu Undefined Behavior führen. | Medium |
-| **V-03** | `stm32-uart.hpp` | Zeile 162 | Safety / Logik | Die Methode `receiveByte()` gibt `0U` zurück, wenn der Handle ein `nullptr` ist oder ein Timeout auftritt. Das ist extrem gefährlich, da `0x00` ein gültiges Datenbyte sein kann. | High |
-| **V-04** | `Alle Test-Dateien` | Global | `[ADR-FSM-0017]` | In den Tests wird `uint8_t` oder `uint16_t` verwendet. Gemäß Sprachuntermenge muss es zwingend `std::uint8_t` heißen. | Low |
-| **V-05** | `Alle *.hpp Dateien`| Doxygen | `[ADR-FSM-0005]` | Kommentare sind weiterhin auf Deutsch. | Medium |
+### 2. CMake-basiertes Multi-Target Build-System
+Das Build-System wurde so konfiguriert, dass aus einer gemeinsamen Code-Basis auf Knopfdruck zwei getrennte Binaries (`app_master.elf` und `app_slave.elf`) generiert werden.
+* Über die CMake-Funktion `add_safety_firmware_target` wird dem Compiler exakt die Hardware-Datei übergeben, die für das jeweilige Target benötigt wird.
+* Globale Präprozessor-Makros (`-DIPK_MASTER`, `-DIPK_SLAVE`) werden automatisch durch CMake injiziert.
 
----
+### 3. Ablösung des Legacy-Loggers (`debug.cpp`)
+Die veraltete, synchron blockierende Logging-Implementierung (`debug.cpp`), welche C-Standardfunktionen wie `std::snprintf` und direkte HAL-Aufrufe (`HAL_UART_Transmit`) nutzte, wurde vollständig entfernt.
+* **Neues Konzept:** Es wird der Papyrus-Architektur-konforme `BufferedReporter` eingesetzt.
+* Dieser nutzt einen asynchronen Ringpuffer und kommuniziert ausschließlich über das abstrakte `ITransmitter`-Interface. Dies verhindert CPU-Blockaden durch langsame serielle Schnittstellen und erhöht die Safety-Konformität.
 
-## 3. Verbesserungsvorschläge (Suggestions)
-
-Um die letzten Risiken in der Hardware-Anbindung abzustellen, schlage ich Folgendes vor:
-
-1. **ISR-Synchronisation (V-02 beheben):**
-   Ersetze `volatile bool` durch `std::atomic<bool>`. Dies garantiert auf C++-Ebene atomare Zugriffe ohne Memory-Reordering durch den Compiler.
-   ```cpp
-   #include <atomic>
-   // ...
-   std::atomic<bool> m_sending{false};
-   std::atomic<bool> m_receiving{false};
-   ```
-2. **Sicheres `receiveByte` (V-03 beheben):**
-   Da das Interface `ITransceiver` einen fixen Return-Value vorgibt, gibt es keine Fehler-Rückgabe. Da dieses Interface synchron blockiert, sollte die Methode aus dem Interface idealerweise in `[[nodiscard]] virtual std::optional<std::uint8_t> receiveByte() = 0;` geändert werden. Falls das Interface nicht geändert werden darf, MUSS der Aufrufer den Status des UARTs vorab abfragen können (was aktuell nicht implementiert ist).
-3. **MISRA Deviation für `const_cast` (V-01):**
-   Erstellt ein offizielles Dokument im Projekt: "Deviation von MISRA 8.2.3: ST HAL APIs für Transmit-Funktionen sind historisch bedingt nicht const-correct. Da die Hardware-Register in diesem Modus nur Lesezugriffe auf den RAM ausführen, ist der `const_cast` an dieser Grenze sicherheitstechnisch unbedenklich."
-4. **Namespace in Tests (V-04 beheben):**
-   Führe ein Suchen & Ersetzen in den Test-Dateien durch: `uint8_t` -> `std::uint8_t`.
+### 4. Asynchrone IPK-Querkommunikation (UART-DMA)
+Die Kommunikation zwischen Master und Slave wurde über die Schnittstellen `IConcurrentTransmitter` und `IConcurrentReceiver` implementiert.
+* Die Klasse `Stm32UartDma` kapselt die Hardware-Details und die Interrupt-Callbacks.
+* **Memory Protection (MPU):** Um Datenkorruption durch den L1-Daten-Cache des Cortex-M7 zu verhindern, wurde eine dedizierte MPU-Region für das D2-SRAM (0x30000000) konfiguriert (`MPU_ACCESS_NOT_CACHEABLE`). Die DMA-Puffer liegen in diesem geschützten Bereich, zusätzlich abgesichert durch explizite Cache-Maintenance-Operationen (`SCB_CleanDCache`, `SCB_InvalidateDCache`).
 
 ---
 
-## 4. Verifikation (Test Coverage)
+## Umgang mit CubeMX (`.ioc` Dateien)
 
-Die Unit-Tests sind ein absolutes Highlight dieses Päckchens. Der Entwickler hat C-Funktionen der HAL (z.B. `HAL_UART_Transmit`) in den Tests überschrieben (gemockt), um den Zustand des Adapters zu spyen. 
-
-### Positive Befunde
-* **Contract-Testing:** `test-zm-tester-platform.cpp` verifiziert erfolgreich, dass das Architektur-Konzept der Rollenverteilung (`ITransmitter` und `IReceiver` zeigen auf dieselbe Instanz) funktioniert.
-* **Vollständige Pfad-Abdeckung:** `test-stm32-uart-dma.cpp` deckt gezielt Fehlerfälle (z.B. Nullpointer-Übergaben, leere Puffer) ab.
-* **Robustheit:** Die Tests verifizieren, dass Aufrufe von `startSending` bei bereits laufendem DMA korrekt mit `AsyncStatus::Busy` abgewiesen werden (`[ADR-FSM-0034]`).
-
-### Lücken & Vorschläge für die Tests
-* Der Test-Coverage Report im Code markiert, dass der Zweig für den DMA-Counter in `getRemainingBytesToSend()` schwer testbar ist. Eine Möglichkeit wäre, die Dummy-C-Funktion `__HAL_DMA_GET_COUNTER` in der Test-Umgebung so umzuschreiben, dass sie einen globalen Mock-Wert zurückgibt, den der Test vorher setzt.
+Die STM32CubeMX-Projektdateien (`master.ioc`, `slave.ioc`) verbleiben als Konfigurations- und Dokumentationswerkzeuge im Projekt. CubeMX wird jedoch **nicht** mehr als Build-Master oder zentraler Code-Generator für die gesamte Projektstruktur verwendet. 
+Bei zukünftigen Hardware-Änderungen (z.B. neuen Pins) wird der Code temporär via CubeMX generiert und die relevanten Abschnitte manuell in die Dateien `board.master.cpp` bzw. `board.slave.cpp` überführt. Dies schützt die C++-Architektur vor destruktiven Überschreibungen durch den Generator.
 
 ---
 
-## 5. Compliance-Zusammenfassung (Compliance Summary)
+## Ausstehende Optimierungen (Next Steps)
 
-Die Hardware-Adapter sind hochprofessionell geschrieben. Die Cache-Verwaltung für den DMA zeigt tiefes Verständnis der Cortex-M7 Architektur. Mit dem Umstieg auf `std::atomic` und der Dokumentation der `const_cast` Deviation ist der Code uneingeschränkt SIL3-tauglich.
+Das aktuelle System dient als voll funktionsfähige Baseline. Für die finale Produktionsreife stehen folgende Refactorings an:
 
-| Regel-ID | Beschreibung | Status/Begründung |
-| :--- | :--- | :--- |
-| **Papyrus Architektur** | UML Abdeckung | Exzellent. Die `ZmTesterPlatform` verknüpft die Instanzen exakt nach Vorgabe. |
-| **[ADR-FSM-0005]** | Englisch für Bezeichner/Kommentare | Offen. Doxygen ist aktuell auf Deutsch. |
-| **[ADR-FSM-0017]** | Triviale Datentypen / Fixed Width | Fast eingehalten. In den Tests fehlt vereinzelt der `std::` Namespace. |
-| **[ADR-FSM-0022]** | Early Exit | Eingehalten. Nullpointer und leere Arrays werden sofort abgewiesen. |
-| **[ADR-FSM-0024]** | `noexcept` Spezifizierer | Eingehalten. Alle kritischen HAL-Methoden sind konsequent `noexcept`. |
-| **[MISRA Rule 8.2.3]** | Entfernen von `const` Qualifizierern | Abweichung (Deviation) zwingend nötig. Die ST-HAL-API erfordert einen `const_cast`. |
-| **Safety / Concurrency** | Race Conditions | Offen (Kritisch). `volatile bool` für ISR-Status-Flags muss durch `std::atomic<bool>` ersetzt werden. |
+1. **Auflösung der Präprozessor-Branches in der Applikationslogik:**
+   Gemäß Architekturrichtlinie *[ADR-FSM-0009]* dürfen `#ifdef`-Verzweigungen nicht zur Steuerung der Applikationslogik verwendet werden. Die in der `main.cpp` verbliebenen `#ifdef IPK_MASTER` Blöcke für die Ping-Pong-Logik werden im nächsten Schritt in separate Compilation-Units (`app_logic_master.cpp`, `app_logic_slave.cpp`) ausgelagert und über CMake verlinkt.
+   
+2. **Vorbereitung der "Basic"-Schicht:**
+   Die `main.cpp` wird weiter verschlankt, um als reine Start-Routine zu fungieren. Die eigentliche Applikationsschleife (Main-Loop) wird in eine abstrakte Hardware-unabhängige Ebene verschoben, um zukünftig nahtlos zwischen echter Hardware und Software-in-the-Loop (SIL) Simulation wechseln zu können.
+
+3. **Speicherallokation der DMA-Puffer:**
+   Die aktuell über `reinterpret_cast` definierten Speicheradressen für die DMA-Puffer werden durch eine saubere Linker-Script-Sektion (z.B. `.d2_sram`) und die Verwendung von `__attribute__((section("...")))` ersetzt.
