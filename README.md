@@ -49,5 +49,89 @@ Das aktuelle System dient als voll funktionsfähige Baseline. Für die finale Pr
 2. **Vorbereitung der "Basic"-Schicht:**
    Die `main.cpp` wird weiter verschlankt, um als reine Start-Routine zu fungieren. Die eigentliche Applikationsschleife (Main-Loop) wird in eine abstrakte Hardware-unabhängige Ebene verschoben, um zukünftig nahtlos zwischen echter Hardware und Software-in-the-Loop (SIL) Simulation wechseln zu können.
 
-3. **Speicherallokation der DMA-Puffer:**
+# Projektstatus: gbe.basic.labormuster (Hybrid)
+
+Dieses Repository repräsentiert den **Hybrid-Stand** aus der Zusammenführung des ursprünglichen Labormusters und der Firmware `sl-vario.zmve.firmware`.
+
+Das Ziel ist die Etablierung einer **SIL3-konformen** Basis-Architektur unter strikter Einhaltung von **MISRA**-Regeln und der **Papyrus UML-Architektur**.
+
+---
+
+## 📊 KI Status Übersicht
+
+| Kategorie | Status | Beschreibung |
+| :--- | :--- | :--- |
+| **Projektphase** | 🚧 **WIP** | Migration läuft, Hybrid-Status zwischen Alt und Neu. |
+| **Safety Level** | ⚠️ **Nicht SIL3** | Kritische Abweichungen im Code vorhanden (siehe Findings). |
+| **Architektur** | 🟡 **Teilweise** | Master-Seite weit fortgeschritten, Slave-Seite inkonsistent. |
+| **Tests** | 🟡 **Lückenhaft** | Gute Ansätze bei UART-Tests, aber fehlende Coverage bei Reportern. |
+
+---
+
+## 🛠 Technische Highlights & Änderungen
+
+### 1. Neue Inter-Prozessor-Kommunikation (IPK)
+Die Kommunikation zwischen Master und Slave wurde massiv überarbeitet:
+*   **Schnittstelle:** UART7
+*   **Technologie:** **DMA (Direct Memory Access)** statt blockierender Interrupts.
+*   **Vorteil:** Die CPU wird entlastet, was für deterministisches Echtzeitverhalten (SIL3) essenziell ist.
+*   **Cache Coherency:** Korrekte Implementierung von `SCB_CleanDCache` und `SCB_InvalidateDCache` für den Cortex-M7.
+
+### 2. Qualitätssicherung & Prozess
+Im Gegensatz zum alten Projekt (`sl-vario.zmve.firmware`) liegt der Fokus nun auf:
+*   **Review-Driven Development:** Jede Komponente besitzt ein Review-Dokument (`.md`).
+*   **Modern C++:** Einsatz von `constexpr`, `noexcept` und Typsicherheit statt C-Makros.
+*   **Architektur-Treue:** Code wird gegen das Papyrus-UML-Modell validiert.
+
+---
+
+## 🔍 Analyse-Ergebnisse (Zusammenführung)
+
+### ✅ Vorteile (Pros)
+*   **Performance:** Die neue DMA-Architektur im `board.master.cpp` ermöglicht Hochgeschwindigkeits-Datentransfer ohne CPU-Blockade.
+*   **Wartbarkeit:** Strikte Trennung von Interfaces (`IPort`, `ITransmitter`) und Implementierung.
+*   **Sicherheit:** Systematische Eliminierung von unsicheren C-Konstrukten (in Arbeit).
+
+### ❌ Nachteile & Risiken (Cons)
+*   **Inkonsistenz (Master vs. Slave):**
+    *   `board.master.cpp`: Enthält die neue DMA/UART7 Initialisierung.
+    *   `board.slave.cpp`: Ist noch auf dem Stand des alten Projekts (kein DMA für IPK konfiguriert, Copy-Paste-Reste).
+*   **"Leaky Abstractions":** Das `IPort`-Interface vermischt abstrakte UML-Vorgaben mit Hardware-Details (z.B. `writeMasked` für STM32 BSRR).
+
+---
+
+## 🚨 Kritische Findings (Action Items)
+
+Um die **SIL3-Zertifizierbarkeit** zu erreichen, müssen folgende Punkte zwingend abgearbeitet werden:
+
+### 1. Safety & Concurrency
+- [ ] **Fix:** Ersetzen von `volatile bool` durch `std::atomic<bool>` in `stm32_uart_dma.hpp` (Vermeidung von Race Conditions).
+- [ ] **Fix:** Entfernen verbotener C-Funktionen (`memcpy`, `snprintf`, `strlen`) in `BufferedReporter` und `StringBuffer`. Nutzung von `std::copy`, `std::to_chars` o.ä.
+- [ ] **Fix:** Korrektur der impliziten Typ-Promotion in `version.hpp` (Gefahr von Integer Overflows).
+
+### 2. MISRA Compliance
+- [ ] **Doc:** Erstellen eines formalen **Deviation Requests** für `const_cast` in den HAL-Adaptern (bedingt durch ST-API).
+- [ ] **Code:** Implementierung der "Rule of Five" (`= delete` für Copy/Move) in allen polymorphen Basisklassen (`ITransmitter` etc.).
+
+### 3. Implementierung
+- [ ] **Code:** Nachziehen der DMA-Initialisierung in `board.slave.cpp`.
+- [ ] **Test:** Schreiben von Unit-Tests (TDD) für `StringBuffer` und `BufferedReporter`.
+
+---
+
+## 📂 Projektstruktur (Auszug)
+
+```text
+gbe.basic.labormuster/
+├── bsp/stm32h7_cube/Core/Src/
+│   ├── board.master.cpp       # ✅ Neu: Mit DMA & IPK Setup
+│   └── board.slave.cpp        # ⚠️ Alt: Muss aktualisiert werden
+├── lib/elements/
+│   ├── gbe.hal/               # Hardware Abstraction Layer (Interfaces)
+│   ├── gbe.safety/            # Safety Utilities (RingBuffer)
+│   └── gbe.utility/           # General Utilities (Version, Bitmask)
+└── tests/                     # GoogleTest Unit Tests
+
+
+4. **Speicherallokation der DMA-Puffer:**
    Die aktuell über `reinterpret_cast` definierten Speicheradressen für die DMA-Puffer werden durch eine saubere Linker-Script-Sektion (z.B. `.d2_sram`) und die Verwendung von `__attribute__((section("...")))` ersetzt.
